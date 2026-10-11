@@ -3,10 +3,19 @@ from pathlib import Path
 import cv2
 # globbing utility.
 import glob
+import shutil #for clearing output folder before writing new annotated images
+
+
 
 #file folder paths
 input_path = Path("kepek/nyers/test1")
 output_dir = Path("kepek/feldolgozott/test1")
+
+for item in output_dir.iterdir(): # wipe output folder (contains annotated images)
+    if item.is_dir():
+        shutil.rmtree(item)
+    else:
+        item.unlink()
 
 # select the path
 #path = "kepek/nyers/test1/*.jpg"
@@ -114,9 +123,14 @@ for i, result in enumerate(results): # enumerate for indexing
         
     
     #annotated images:
-    output_fName = f"{input_path.stem}_processed{input_path.suffix}"
+    source_path = Path(result.path)
+    output_fName = f"{source_path.stem}_processed{source_path.suffix}"
     output_path = output_dir / output_fName
-    cv2.imwrite(str(output_path), image)
+    if w >= max_width or h >= max_height:
+        cv2.imwrite(str(output_path), resized_image)
+    else:
+        cv2.imwrite(str(output_path), image)
+
 
 
 
