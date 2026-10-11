@@ -39,36 +39,81 @@ def draw_BB(box, images):
         images,
         (x1, y1),
         (x2, y2),
-        (255, 255, 255),
+        (255, 255, 0),
         2
     )
-    label = f"Face {confidence:.4f}"
+    label = f"Face {confidence:.2f}"
     cv2.putText(
         images,
         label,
         (x1, y1 - 10),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.5,
-        (255, 255, 255),
+        (255, 255, 0),
         2
     )
 
+def draw_rBB(box, images): #resized bounding boxes
+    #extract BB coordinates
+    x1, y1, x2, y2 = box.xyxy[0]
+    x1 = int(x1/3)
+    y1 = int(y1/3)
+    x2 = int(x2/3)
+    y2 = int(y2/3)
+    confidence = float(box.conf[0]) #detection confidence stored for display
+    #BB drawing:
+    cv2.rectangle(
+        images,
+        (x1, y1),
+        (x2, y2),
+        (255, 255, 0),
+        2
+    )
+    label = f"Face {confidence:.2f}"
+    cv2.putText(
+        images,
+        label,
+        (x1, y1 - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (255, 255, 0),
+        2
+    )
 #------------------------------------
 
 
 results = model(str(input_path))
 
-# Run inference on images
-#images = cv2.imread(str(input_path))
-for i, result in enumerate(results):
+max_width = 1080
+max_height = 720 # processed images should not exceed a certain limit in display size
+
+
+for i, result in enumerate(results): # enumerate for indexing
     image =  images[i]
-    for j, box in enumerate(result.boxes):
-        #image = cv2.imread(file)
-        eredmeny_print(box, j)
-        draw_BB(box, image)
-        cv2.imshow(input_path.name, image)
+    w = image.shape[1]
+    h = image.shape[0] # to access image height and width
+    newW = int(image.shape[1]/3)
+    newH = int(image.shape[0]/3)
     
-    #output
+    resized_image = cv2.resize(image, (newW, newH))
+    if w >= max_width or h >= max_height:
+        for j, box in enumerate(result.boxes): #output
+                eredmeny_print(box, j)
+                draw_rBB(box, resized_image)
+                cv2.imshow(input_path.name, resized_image)
+    else: 
+        for j, box in enumerate(result.boxes): #output
+            eredmeny_print(box, j)
+            draw_BB(box, image)
+            cv2.imshow(input_path.name, image)
+        
+
+        
+        
+        
+        
+    
+    #annotated images:
     output_fName = f"{input_path.stem}_processed{input_path.suffix}"
     output_path = output_dir / output_fName
     cv2.imwrite(str(output_path), image)
