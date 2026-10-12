@@ -8,8 +8,8 @@ import shutil #for clearing output folder before writing new annotated images
 
 
 #file folder paths
-input_path = Path("kepek/nyers/test1")
-output_dir = Path("kepek/feldolgozott/test1")
+input_path = Path("kepek/test2/nyers")
+output_dir = Path("kepek/test2/feldolgozott")
 
 for item in output_dir.iterdir(): # wipe output folder (contains annotated images)
     if item.is_dir():
@@ -51,7 +51,7 @@ def draw_BB(box, images):
         (255, 255, 0),
         2
     )
-    label = f"Face {confidence:.2f}"
+    label = f"Face {100*confidence:.2f}%"
     cv2.putText(
         images,
         label,
@@ -78,7 +78,7 @@ def draw_rBB(box, images): #resized bounding boxes
         (255, 255, 0),
         2
     )
-    label = f"Face {confidence:.2f}"
+    label = f"Face {100*confidence:.2f}%"
     cv2.putText(
         images,
         label,
