@@ -8,8 +8,8 @@ import shutil #for clearing output folder before writing new annotated images
 
 
 #file folder paths
-input_path = Path("kepek/test2/nyers")
-output_dir = Path("kepek/test2/feldolgozott")
+input_path = Path("kepek/landmarking test2/nyers")
+output_dir = Path("kepek/landmarking test2/feldolgozott")
 
 for item in output_dir.iterdir(): # wipe output folder (contains annotated images)
     if item.is_dir():
@@ -19,10 +19,10 @@ for item in output_dir.iterdir(): # wipe output folder (contains annotated image
 
 # select the path
 #path = "kepek/nyers/test1/*.jpg"
-images = [cv2.imread(str(path)) for path in input_path.glob("*.jpg")] #line comprehension
+# Each result already contains its matching original image (result.orig_img).
 
 # Load the pretrained face-detection model
-model = YOLO("weights/yolo11n.pt")
+model = YOLO("weights/yolo11s-pose_widerface.pt")
 
 #---------fncs-----------------------
 def eredmeny_print(box, i):
@@ -88,6 +88,30 @@ def draw_rBB(box, images): #resized bounding boxes
         (255, 255, 0),
         2
     )
+def draw_landmarks(keypoints, image, scale=1.0, min_confidence=0.5):
+    # Five points per face. Numbering preserves the model's landmark order.
+    # Left/right refer to the picture as viewed, not the person's anatomy.
+    landmark_names = ("left eye", "right eye", "nose tip",
+                      "left mouth corner", "right mouth corner")
+    # Coordinates are in original-image pixels; scale only changes the drawing.
+    for face_i, points in enumerate(keypoints.data.cpu().tolist()):
+        print(f"  Landmarks for face {face_i + 1} (original-image pixels):")
+        for point_i, point in enumerate(points):
+            x, y = point[:2]
+            confidence = point[2] if len(point) == 3 else None
+            valid = (x > 0 and y > 0 and
+                     (confidence is None or confidence >= min_confidence))
+            confidence_text = "n/a" if confidence is None else f"{confidence:.3f}"
+            print(f"    {landmark_names[point_i]}: x={x:.2f}, y={y:.2f}, "
+                  f"confidence={confidence_text}, drawn={valid}")
+            if not valid:
+                continue
+            position = (round(x * scale), round(y * scale))
+            cv2.circle(image, position, 3, (0, 0, 255), -1)
+            cv2.putText(image, str(point_i),
+                        (position[0] + 4, position[1] - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+
 #------------------------------------
 
 
@@ -98,7 +122,7 @@ max_height = 720 # processed images should not exceed a certain limit in display
 
 
 for i, result in enumerate(results): # enumerate for indexing
-    image =  images[i]
+    image = result.orig_img.copy() # guaranteed to match this result's boxes/keypoints
     w = image.shape[1]
     h = image.shape[0] # to access image height and width
     newW = int(image.shape[1]/3)
@@ -109,12 +133,16 @@ for i, result in enumerate(results): # enumerate for indexing
         for j, box in enumerate(result.boxes): #output
                 eredmeny_print(box, j)
                 draw_rBB(box, resized_image)
-                cv2.imshow(input_path.name, resized_image)
+        if result.keypoints is not None:
+            draw_landmarks(result.keypoints, resized_image, scale=1/3)
+        cv2.imshow(input_path.name, resized_image)
     else: 
         for j, box in enumerate(result.boxes): #output
             eredmeny_print(box, j)
             draw_BB(box, image)
-            cv2.imshow(input_path.name, image)
+        if result.keypoints is not None:
+            draw_landmarks(result.keypoints, image)
+        cv2.imshow(input_path.name, image)
         
 
         

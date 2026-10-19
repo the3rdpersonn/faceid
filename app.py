@@ -5,7 +5,7 @@ from datetime import datetime as dt
 import cv2
 from cam_input import *
 
-input_dir = Path(__file__).resolve().parent / "kepek/test2/nyers"
+input_dir = Path(__file__).resolve().parent / "kepek/landmarking test2/nyers"
 # Path type object. resolve() ->absolute path - the complete location of the script
 # parent: THE CODE + "kepek/test2/nyers" joins folder with the input folder
 # advantage: this stays relative to the scripts location, regardless where i run it from.
