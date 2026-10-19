@@ -1,7 +1,7 @@
 from ultralytics import YOLO
 from pathlib import Path
 import cv2
-from preprocessing import rotate_face
+from preprocessing import crop_face, rotate_face
 # globbing utility.
 import glob
 import shutil #for clearing output folder before writing new annotated images
@@ -13,6 +13,8 @@ input_path = Path("kepek/landmarking test2/nyers")
 output_dir = Path("kepek/landmarking test2/feldolgozott")
 aligned_dir = input_path.parent / "aligned"
 aligned_dir.mkdir(parents=True, exist_ok=True)
+cropped_dir = input_path.parent / "cropped"
+cropped_dir.mkdir(parents=True, exist_ok=True)
 
 for item in output_dir.iterdir(): # wipe output folder (contains annotated images)
     if item.is_dir():
@@ -26,6 +28,8 @@ for item in output_dir.iterdir(): # wipe output folder (contains annotated image
 
 # Load the pretrained face-detection model
 model = YOLO("weights/yolo11s-pose_widerface.pt")
+# Second detector for the rotated image; its checkpoint can be changed independently.
+model2 = YOLO("weights/yolo11s-pose_widerface.pt")
 
 #---------fncs-----------------------
 def eredmeny_print(box, i):
@@ -115,7 +119,7 @@ def draw_landmarks(keypoints, image, scale=1.0, min_confidence=0.5):
                         (position[0] + 4, position[1] - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
 
-def display_aligned_faces(result):
+def process_aligned_faces(result, model2, aligned_dir, cropped_dir):
     if result.keypoints is None:
         return
     source_path = Path(result.path)
@@ -127,7 +131,14 @@ def display_aligned_faces(result):
         aligned_path = aligned_dir / f"{source_path.stem}_face_{face_i + 1}_aligned{source_path.suffix}"
         if not cv2.imwrite(str(aligned_path), aligned_image):
             raise RuntimeError(f"Could not save aligned image: {aligned_path}")
-        cv2.imshow(f"Aligned face {face_i + 1}", aligned_image)
+        # Detect again so the box coordinates belong to the rotated image.
+        aligned_result = model2(aligned_image, verbose=False)[0]
+        box_coordinates = aligned_result.boxes.xyxy[0].cpu().tolist()
+        cropped_image, _ = crop_face(aligned_image, box_coordinates)
+        cropped_path = cropped_dir / f"{source_path.stem}_face_{face_i + 1}_cropped{source_path.suffix}"
+        if not cv2.imwrite(str(cropped_path), cropped_image):
+            raise RuntimeError(f"Could not save cropped image: {cropped_path}")
+        cv2.imshow(f"Cropped face {face_i + 1}", cropped_image)
 
 #------------------------------------
 
@@ -167,7 +178,7 @@ for i, result in enumerate(results): # enumerate for indexing
         
         
     
-    display_aligned_faces(result)
+    process_aligned_faces(result, model2, aligned_dir, cropped_dir)
 
     #annotated images:
     source_path = Path(result.path)
