@@ -1,6 +1,7 @@
 from ultralytics import YOLO
 from pathlib import Path
 import cv2
+from preprocessing import rotate_face
 # globbing utility.
 import glob
 import shutil #for clearing output folder before writing new annotated images
@@ -10,6 +11,8 @@ import shutil #for clearing output folder before writing new annotated images
 #file folder paths
 input_path = Path("kepek/landmarking test2/nyers")
 output_dir = Path("kepek/landmarking test2/feldolgozott")
+aligned_dir = input_path.parent / "aligned"
+aligned_dir.mkdir(parents=True, exist_ok=True)
 
 for item in output_dir.iterdir(): # wipe output folder (contains annotated images)
     if item.is_dir():
@@ -112,6 +115,20 @@ def draw_landmarks(keypoints, image, scale=1.0, min_confidence=0.5):
                         (position[0] + 4, position[1] - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
 
+def display_aligned_faces(result):
+    if result.keypoints is None:
+        return
+    source_path = Path(result.path)
+    for face_i, points in enumerate(result.keypoints.data.cpu().tolist()):
+        left_eye = points[0][:2]
+        right_eye = points[1][:2]
+        aligned_image, angle = rotate_face(result.orig_img, left_eye, right_eye)
+        print(f"  Face {face_i + 1}: eye-line angle = {angle:.2f} degrees")
+        aligned_path = aligned_dir / f"{source_path.stem}_face_{face_i + 1}_aligned{source_path.suffix}"
+        if not cv2.imwrite(str(aligned_path), aligned_image):
+            raise RuntimeError(f"Could not save aligned image: {aligned_path}")
+        cv2.imshow(f"Aligned face {face_i + 1}", aligned_image)
+
 #------------------------------------
 
 
@@ -135,14 +152,14 @@ for i, result in enumerate(results): # enumerate for indexing
                 draw_rBB(box, resized_image)
         if result.keypoints is not None:
             draw_landmarks(result.keypoints, resized_image, scale=1/3)
-        cv2.imshow(input_path.name, resized_image)
+        # cv2.imshow(input_path.name, resized_image)
     else: 
         for j, box in enumerate(result.boxes): #output
             eredmeny_print(box, j)
             draw_BB(box, image)
         if result.keypoints is not None:
             draw_landmarks(result.keypoints, image)
-        cv2.imshow(input_path.name, image)
+        # cv2.imshow(input_path.name, image)
         
 
         
@@ -150,6 +167,8 @@ for i, result in enumerate(results): # enumerate for indexing
         
         
     
+    display_aligned_faces(result)
+
     #annotated images:
     source_path = Path(result.path)
     output_fName = f"{source_path.stem}_processed{source_path.suffix}"
