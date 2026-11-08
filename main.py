@@ -1,10 +1,10 @@
 from ultralytics import YOLO
 from pathlib import Path
+import csv
 import cv2
-from preprocessing import crop_face, rotate_face
-# globbing utility.
-import glob
-import shutil #for clearing output folder before writing new annotated images
+import numpy as np
+from preprocessing import crop_face, create_embedding, load_embedder
+from preprocessing import prepare_embedding_face, rotate_face, transform_face_box
 
 
 
@@ -96,34 +96,52 @@ def draw_landmarks(keypoints, image, scale=1.0, min_confidence=0.5):
                         (position[0] + 4, position[1] - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
 
-def process_aligned_faces(result, model2, aligned_dir, cropped_dir, show=True):
+def process_aligned_faces(result, session, aligned_dir, cropped_dir, show=True, embedding_dir=None):
     processed_faces = [] # Return images for the GUI as well as saving them.
     if result.keypoints is None:
         return processed_faces
     source_path = Path(result.path)
-    for face_i, points in enumerate(result.keypoints.data.cpu().tolist()):
+    landmark_groups = result.keypoints.data.cpu().tolist()
+    boxes = result.boxes.xyxy.cpu().tolist()
+    for face_i, points in enumerate(landmark_groups):
         left_eye = points[0][:2]
         right_eye = points[1][:2]
-        aligned_image, angle = rotate_face(result.orig_img, left_eye, right_eye)
-        print(f"  Face {face_i + 1}: eye-line angle = {angle:.2f} degrees")
-        aligned_path = aligned_dir / f"{source_path.stem}_face_{face_i + 1}_aligned{source_path.suffix}"
+        aligned_image, _, rotation_matrix = rotate_face(result.orig_img, left_eye, right_eye)
+        face_stem = f"{source_path.stem}_face_{face_i + 1}"
+        aligned_path = aligned_dir / f"{face_stem}_aligned{source_path.suffix}"
         if not cv2.imwrite(str(aligned_path), aligned_image):
             raise RuntimeError(f"Could not save aligned image: {aligned_path}")
-        # Detect again so the box coordinates belong to the rotated image.
-        aligned_result = model2(aligned_image, verbose=False)[0]
-        face_count = len(aligned_result.boxes)
-        if face_count != 1:
-            print(f"  Face {face_i + 1}: found {face_count} faces after rotation; skipping crop.")
-            processed_faces.append((aligned_image, None))
-            continue
-        box_coordinates = aligned_result.boxes.xyxy[0].cpu().tolist()
-        cropped_image, crop_bounds = crop_face(aligned_image, box_coordinates)
-        print(f"  Face {face_i + 1}: crop bounds = {crop_bounds}")
-        cropped_path = cropped_dir / f"{source_path.stem}_face_{face_i + 1}_cropped{source_path.suffix}"
-        if not cv2.imwrite(str(cropped_path), cropped_image):
-            raise RuntimeError(f"Could not save cropped image: {cropped_path}")
-        processed_faces.append((aligned_image, cropped_image))
-        if show:
+
+        # reuse the original face box instead of detecting the rotated image again
+        rotated_box = transform_face_box(boxes[face_i], rotation_matrix)
+        cropped_image = None
+        try:
+            cropped_image, _ = crop_face(aligned_image, rotated_box)
+        except ValueError as error:
+            print(f"Preview crop unavailable for {face_stem}: {error}")
+        if cropped_image is not None:
+            cropped_path = cropped_dir / f"{face_stem}_cropped{source_path.suffix}"
+            if not cv2.imwrite(str(cropped_path), cropped_image):
+                raise RuntimeError(f"Could not save cropped image: {cropped_path}")
+
+        # the recognizer has its own crop; the box crop is for inspection
+        embedding = None
+        if session is not None:
+            try:
+                model_face = prepare_embedding_face(result.orig_img, points)
+                embedding = create_embedding(model_face, session)
+            except Exception as error:
+                print(f"Embedding unavailable for {face_stem}: {error}")
+
+        if embedding is not None and embedding_dir is not None:
+            model_face_path = embedding_dir / f"{face_stem}_input.png"
+            if not cv2.imwrite(str(model_face_path), model_face):
+                raise RuntimeError(f"Could not save embedding input: {model_face_path}")
+            embedding_path = embedding_dir / f"{face_stem}_embedding.npy"
+            np.save(embedding_path, embedding)
+
+        processed_faces.append((aligned_image, cropped_image, embedding))
+        if show and cropped_image is not None:
             cv2.imshow(f"Cropped face {face_i + 1}", cropped_image)
     return processed_faces
 
@@ -131,80 +149,41 @@ def process_aligned_faces(result, model2, aligned_dir, cropped_dir, show=True):
 
 
 def main():
-    #file folder paths
-    input_path = Path("kepek/landmarking test2/nyers")
-    output_dir = Path("kepek/landmarking test2/feldolgozott")
-    aligned_dir = input_path.parent / "aligned"
-    aligned_dir.mkdir(parents=True, exist_ok=True)
-    cropped_dir = input_path.parent / "cropped"
-    cropped_dir.mkdir(parents=True, exist_ok=True)
+    # the batch test reads old captures but only writes to its own folder
+    project_dir = Path(__file__).resolve().parent
+    input_path = project_dir / "kepek/landmarking test2/nyers"
+    output_dir = project_dir / "kepek/embedding test1"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    for item in output_dir.iterdir(): # wipe output folder (contains annotated images)
-        if item.is_dir():
-            shutil.rmtree(item)
-        else:
-            item.unlink()
+    weights = project_dir / "weights"
+    model = YOLO(str(weights / "yolo11s-pose_widerface.pt"))
+    session = load_embedder(weights / "w600k_r50.onnx")
+    results = model(str(input_path), stream=True, verbose=False)
+    report_path = output_dir / "results.csv"
 
-    # select the path
-    #path = "kepek/nyers/test1/*.jpg"
-    # Each result already contains its matching original image (result.orig_img).
-
-    # Load the pretrained face-detection model
-    model = YOLO("weights/yolo11s-pose_widerface.pt")
-    # Second detector for the rotated image; its checkpoint can be changed independently.
-    model2 = YOLO("weights/yolo11s-pose_widerface.pt")
-
-    results = model(str(input_path))
-
-    max_width = 1080
-    max_height = 720 # processed images should not exceed a certain limit in display size
-
-
-    for i, result in enumerate(results): # enumerate for indexing
-        image = result.orig_img.copy() # guaranteed to match this result's boxes/keypoints
-        w = image.shape[1]
-        h = image.shape[0] # to access image height and width
-        newW = int(image.shape[1]/3)
-        newH = int(image.shape[0]/3)
-
-        resized_image = cv2.resize(image, (newW, newH))
-        if w >= max_width or h >= max_height:
-            for j, box in enumerate(result.boxes): #output
-                    eredmeny_print(box, j)
-                    draw_rBB(box, resized_image)
-            if result.keypoints is not None:
-                draw_landmarks(result.keypoints, resized_image, scale=1/3)
-            # cv2.imshow(input_path.name, resized_image)
-        else:
-            for j, box in enumerate(result.boxes): #output
-                eredmeny_print(box, j)
-                draw_BB(box, image)
-            if result.keypoints is not None:
-                draw_landmarks(result.keypoints, image)
-            # cv2.imshow(input_path.name, image)
-
-
-
-
-
-
-
-        process_aligned_faces(result, model2, aligned_dir, cropped_dir)
-
-        #annotated images:
-        source_path = Path(result.path)
-        output_fName = f"{source_path.stem}_processed{source_path.suffix}"
-        output_path = output_dir / output_fName
-        if w >= max_width or h >= max_height:
-            cv2.imwrite(str(output_path), resized_image)
-        else:
-            cv2.imwrite(str(output_path), image)
-
-
-
-
-        cv2.waitKey(0)# Wait until a key is pressed
-        cv2.destroyAllWindows() # Close the window
+    # write one row per face, or an unavailable row if no face was returned
+    with report_path.open("w", newline="", encoding="utf-8") as report:
+        writer = csv.writer(report)
+        writer.writerow(["image", "face", "status", "preview_file", "input_file", "embedding_file"])
+        for result in results:
+            source_path = Path(result.path)
+            faces = process_aligned_faces(result, session, output_dir, output_dir,
+                                          show=False, embedding_dir=output_dir)
+            if not faces:
+                writer.writerow([source_path.name, "", "unavailable", "", "", ""])
+            for face_number, face in enumerate(faces, start=1):
+                _, cropped_image, embedding = face
+                face_stem = f"{source_path.stem}_face_{face_number}"
+                preview_name = f"{face_stem}_cropped{source_path.suffix}"
+                if cropped_image is None:
+                    preview_name = ""
+                if embedding is None:
+                    writer.writerow([source_path.name, face_number, "unavailable", preview_name, "", ""])
+                else:
+                    model_face_name = f"{face_stem}_input.png"
+                    vector_name = f"{face_stem}_embedding.npy"
+                    writer.writerow([source_path.name, face_number, "ok", preview_name, model_face_name, vector_name])
+    print(f"Embedding test results: {report_path}")
 
 
 if __name__ == "__main__":

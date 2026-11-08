@@ -88,19 +88,20 @@ preview_active = True
 processing_active = False
 processing_results = Queue()
 model = None
-model2 = None
+embedding_session = None
 
 
 def process_capture(image_path):
     # Only this worker uses the models. All widget updates stay in Tkinter.
-    global model, model2
+    global model, embedding_session
     try:
         from main import YOLO, draw_BB, draw_landmarks, eredmeny_print, process_aligned_faces
+        from preprocessing import load_embedder
 
+        weights = Path(__file__).resolve().parent / "weights"
         if model is None:
-            weights = Path(__file__).resolve().parent / "weights/yolo11s-pose_widerface.pt"
-            model = YOLO(str(weights))
-            model2 = YOLO(str(weights))
+            detector_path = weights / "yolo11s-pose_widerface.pt"
+            model = YOLO(str(detector_path))
 
         output_dir = input_dir.parent / "feldolgozott"
         aligned_dir = input_dir.parent / "aligned"
@@ -121,23 +122,40 @@ def process_capture(image_path):
         processing_results.put(("image", annotation_box, annotated))
 
         face_count = len(result.boxes)
-        if face_count != 1:
-            print(f"Found {face_count} faces; alignment and crop require exactly one face.")
-            return
-        if result.keypoints is None:
-            print("No facial landmarks returned; skipping alignment and crop.")
+        if face_count != 1 or result.keypoints is None:
+            processing_results.put(("status", embedding_label, "Embedding unavailable · capture one face"))
             return
 
         processing_results.put(("status", alignment_box, "Aligning and cropping..."))
-        images = process_aligned_faces(result, model2, aligned_dir, cropped_dir, show=False)
+        if embedding_session is None:
+            recognizer_path = weights / "w600k_r50.onnx"
+            try:
+                embedding_session = load_embedder(recognizer_path)
+            except Exception as error:
+                # keep the inspection images available if the recognizer cannot load
+                print(f"Embedding unavailable: {error}")
+
+        images = process_aligned_faces(result, embedding_session, aligned_dir, cropped_dir, show=False)
         if images:
-            aligned, cropped = images[0]
+            aligned, cropped, embedding = images[0]
             processing_results.put(("image", alignment_box, aligned))
             if cropped is not None:
                 processing_results.put(("image", crop_box, cropped))
+            # show three real values from this capture without storing the webcam vector
+            if embedding is None:
+                message = "Embedding unavailable"
+            else:
+                first = embedding[0]
+                second = embedding[1]
+                third = embedding[2]
+                message = f"Embedding created · {embedding.size} values: {first:.4f}, {second:.4f}, {third:.4f}"
+            processing_results.put(("status", embedding_label, message))
+        else:
+            processing_results.put(("status", embedding_label, "Embedding unavailable"))
     except Exception as error:
         # Keep completed panels and report the failed processing step in the terminal.
         print(f"Capture processing failed: {error}")
+        processing_results.put(("status", embedding_label, "Embedding unavailable"))
     finally:
         processing_results.put(("done", None, None))
 
@@ -193,6 +211,7 @@ def foto():
     preview_active = False
     show_image(preview_box, snapshot)
     clear_processing_boxes()
+    embedding_label.configure(text="Creating embedding...")
     button1.configure(state=DISABLED)
     retake_button.configure(state=DISABLED)
     processing_active = True
@@ -205,6 +224,7 @@ def retake():
     if processing_active:
         return
     clear_processing_boxes()
+    embedding_label.configure(text="No embedding yet")
     preview_active = True
     button1.configure(state=NORMAL)
     retake_button.configure(state=DISABLED)
@@ -217,6 +237,10 @@ button1 = Button(button_row, text="Capture", background="purple", fg="white",
 button1.pack(side=LEFT, padx=4)
 retake_button = Button(button_row, text="Retake", command=retake, state=DISABLED)
 retake_button.pack(side=LEFT, padx=4)
+
+# keep the embedding status separate from the image panels
+embedding_label = Label(befoglalo, text="No embedding yet")
+embedding_label.grid(row=3, column=0, columnspan=2, pady=(0, 8))
 
 try:
     update_preview()
