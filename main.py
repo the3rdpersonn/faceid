@@ -8,29 +8,6 @@ import shutil #for clearing output folder before writing new annotated images
 
 
 
-#file folder paths
-input_path = Path("kepek/landmarking test2/nyers")
-output_dir = Path("kepek/landmarking test2/feldolgozott")
-aligned_dir = input_path.parent / "aligned"
-aligned_dir.mkdir(parents=True, exist_ok=True)
-cropped_dir = input_path.parent / "cropped"
-cropped_dir.mkdir(parents=True, exist_ok=True)
-
-for item in output_dir.iterdir(): # wipe output folder (contains annotated images)
-    if item.is_dir():
-        shutil.rmtree(item)
-    else:
-        item.unlink()
-
-# select the path
-#path = "kepek/nyers/test1/*.jpg"
-# Each result already contains its matching original image (result.orig_img).
-
-# Load the pretrained face-detection model
-model = YOLO("weights/yolo11s-pose_widerface.pt")
-# Second detector for the rotated image; its checkpoint can be changed independently.
-model2 = YOLO("weights/yolo11s-pose_widerface.pt")
-
 #---------fncs-----------------------
 def eredmeny_print(box, i):
     coordinates = box.xyxy[0]
@@ -119,9 +96,10 @@ def draw_landmarks(keypoints, image, scale=1.0, min_confidence=0.5):
                         (position[0] + 4, position[1] - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
 
-def process_aligned_faces(result, model2, aligned_dir, cropped_dir):
+def process_aligned_faces(result, model2, aligned_dir, cropped_dir, show=True):
+    processed_faces = [] # Return images for the GUI as well as saving them.
     if result.keypoints is None:
-        return
+        return processed_faces
     source_path = Path(result.path)
     for face_i, points in enumerate(result.keypoints.data.cpu().tolist()):
         left_eye = points[0][:2]
@@ -133,64 +111,101 @@ def process_aligned_faces(result, model2, aligned_dir, cropped_dir):
             raise RuntimeError(f"Could not save aligned image: {aligned_path}")
         # Detect again so the box coordinates belong to the rotated image.
         aligned_result = model2(aligned_image, verbose=False)[0]
+        face_count = len(aligned_result.boxes)
+        if face_count != 1:
+            print(f"  Face {face_i + 1}: found {face_count} faces after rotation; skipping crop.")
+            processed_faces.append((aligned_image, None))
+            continue
         box_coordinates = aligned_result.boxes.xyxy[0].cpu().tolist()
-        cropped_image, _ = crop_face(aligned_image, box_coordinates)
+        cropped_image, crop_bounds = crop_face(aligned_image, box_coordinates)
+        print(f"  Face {face_i + 1}: crop bounds = {crop_bounds}")
         cropped_path = cropped_dir / f"{source_path.stem}_face_{face_i + 1}_cropped{source_path.suffix}"
         if not cv2.imwrite(str(cropped_path), cropped_image):
             raise RuntimeError(f"Could not save cropped image: {cropped_path}")
-        cv2.imshow(f"Cropped face {face_i + 1}", cropped_image)
+        processed_faces.append((aligned_image, cropped_image))
+        if show:
+            cv2.imshow(f"Cropped face {face_i + 1}", cropped_image)
+    return processed_faces
 
 #------------------------------------
 
 
-results = model(str(input_path))
+def main():
+    #file folder paths
+    input_path = Path("kepek/landmarking test2/nyers")
+    output_dir = Path("kepek/landmarking test2/feldolgozott")
+    aligned_dir = input_path.parent / "aligned"
+    aligned_dir.mkdir(parents=True, exist_ok=True)
+    cropped_dir = input_path.parent / "cropped"
+    cropped_dir.mkdir(parents=True, exist_ok=True)
 
-max_width = 1080
-max_height = 720 # processed images should not exceed a certain limit in display size
+    for item in output_dir.iterdir(): # wipe output folder (contains annotated images)
+        if item.is_dir():
+            shutil.rmtree(item)
+        else:
+            item.unlink()
+
+    # select the path
+    #path = "kepek/nyers/test1/*.jpg"
+    # Each result already contains its matching original image (result.orig_img).
+
+    # Load the pretrained face-detection model
+    model = YOLO("weights/yolo11s-pose_widerface.pt")
+    # Second detector for the rotated image; its checkpoint can be changed independently.
+    model2 = YOLO("weights/yolo11s-pose_widerface.pt")
+
+    results = model(str(input_path))
+
+    max_width = 1080
+    max_height = 720 # processed images should not exceed a certain limit in display size
 
 
-for i, result in enumerate(results): # enumerate for indexing
-    image = result.orig_img.copy() # guaranteed to match this result's boxes/keypoints
-    w = image.shape[1]
-    h = image.shape[0] # to access image height and width
-    newW = int(image.shape[1]/3)
-    newH = int(image.shape[0]/3)
-    
-    resized_image = cv2.resize(image, (newW, newH))
-    if w >= max_width or h >= max_height:
-        for j, box in enumerate(result.boxes): #output
+    for i, result in enumerate(results): # enumerate for indexing
+        image = result.orig_img.copy() # guaranteed to match this result's boxes/keypoints
+        w = image.shape[1]
+        h = image.shape[0] # to access image height and width
+        newW = int(image.shape[1]/3)
+        newH = int(image.shape[0]/3)
+
+        resized_image = cv2.resize(image, (newW, newH))
+        if w >= max_width or h >= max_height:
+            for j, box in enumerate(result.boxes): #output
+                    eredmeny_print(box, j)
+                    draw_rBB(box, resized_image)
+            if result.keypoints is not None:
+                draw_landmarks(result.keypoints, resized_image, scale=1/3)
+            # cv2.imshow(input_path.name, resized_image)
+        else:
+            for j, box in enumerate(result.boxes): #output
                 eredmeny_print(box, j)
-                draw_rBB(box, resized_image)
-        if result.keypoints is not None:
-            draw_landmarks(result.keypoints, resized_image, scale=1/3)
-        # cv2.imshow(input_path.name, resized_image)
-    else: 
-        for j, box in enumerate(result.boxes): #output
-            eredmeny_print(box, j)
-            draw_BB(box, image)
-        if result.keypoints is not None:
-            draw_landmarks(result.keypoints, image)
-        # cv2.imshow(input_path.name, image)
-        
-
-        
-        
-        
-        
-    
-    process_aligned_faces(result, model2, aligned_dir, cropped_dir)
-
-    #annotated images:
-    source_path = Path(result.path)
-    output_fName = f"{source_path.stem}_processed{source_path.suffix}"
-    output_path = output_dir / output_fName
-    if w >= max_width or h >= max_height:
-        cv2.imwrite(str(output_path), resized_image)
-    else:
-        cv2.imwrite(str(output_path), image)
+                draw_BB(box, image)
+            if result.keypoints is not None:
+                draw_landmarks(result.keypoints, image)
+            # cv2.imshow(input_path.name, image)
 
 
 
 
-    cv2.waitKey(0)# Wait until a key is pressed
-    cv2.destroyAllWindows() # Close the window
+
+
+
+        process_aligned_faces(result, model2, aligned_dir, cropped_dir)
+
+        #annotated images:
+        source_path = Path(result.path)
+        output_fName = f"{source_path.stem}_processed{source_path.suffix}"
+        output_path = output_dir / output_fName
+        if w >= max_width or h >= max_height:
+            cv2.imwrite(str(output_path), resized_image)
+        else:
+            cv2.imwrite(str(output_path), image)
+
+
+
+
+        cv2.waitKey(0)# Wait until a key is pressed
+        cv2.destroyAllWindows() # Close the window
+
+
+if __name__ == "__main__":
+    main()
