@@ -8,17 +8,20 @@ import onnxruntime
 
 
 def Get_angle(left_eye, right_eye):
-    #input: eye coordinate pairs
-    # Left/right refer to the picture. Image y coordinates increase downwards.
+    # left and right refer to the picture. image y coordinates increase downwards.
     dx = right_eye[0] - left_eye[0]
     dy = right_eye[1] - left_eye[1]
-    return degrees(atan2(dy, dx))
+    angle_in_radians = atan2(dy, dx)
+    angle_in_degrees = degrees(angle_in_radians)
+    return angle_in_degrees
 
 
 def rotate_face(image, left_eye, right_eye):
     angle = Get_angle(left_eye, right_eye)
-    eye_midpoint = ((left_eye[0] + right_eye[0]) / 2,
-                    (left_eye[1] + right_eye[1]) / 2)
+    midpoint_x = (left_eye[0] + right_eye[0]) / 2
+    midpoint_y = (left_eye[1] + right_eye[1]) / 2
+    eye_midpoint = (midpoint_x, midpoint_y)
+
     rotation = cv2.getRotationMatrix2D(eye_midpoint, angle, 1.0)
     height, width = image.shape[:2]
     rotated_image = cv2.warpAffine(image, rotation, (width, height))
@@ -29,7 +32,9 @@ def transform_face_box(box, rotation_matrix):
     # move all four corners into the rotated image's coordinate system
     x1, y1, x2, y2 = box
     corners = np.array([[(x1, y1), (x2, y1), (x2, y2), (x1, y2)]], dtype=np.float64)
-    rotated_corners = cv2.transform(corners, rotation_matrix)[0]
+    transformed_boxes = cv2.transform(corners, rotation_matrix)
+    rotated_corners = transformed_boxes[0]
+
     x_coordinates = rotated_corners[:, 0]
     y_coordinates = rotated_corners[:, 1]
     left = float(x_coordinates.min())
@@ -39,19 +44,32 @@ def transform_face_box(box, rotation_matrix):
     return left, top, right, bottom
 
 
-def crop_face(image, box_coordinates, margin=0.10):
-    # Input: rotated image, (x1, y1, x2, y2), extra margin on each side.
+def crop_face(image, box_coordinates, margin=0.002):
+    # expand the face box, then keep the crop inside the image
     x1, y1, x2, y2 = box_coordinates
     box_width = x2 - x1
     box_height = y2 - y1
     height, width = image.shape[:2]
-    left = max(0, min(width, floor(x1 - box_width * margin)))
-    top = max(0, min(height, floor(y1 - box_height * margin)))
-    right = max(0, min(width, ceil(x2 + box_width * margin)))
-    bottom = max(0, min(height, ceil(y2 + box_height * margin)))
+    horizontal_margin = box_width * margin
+    vertical_margin = box_height * margin
+    left = floor(x1 - horizontal_margin)
+    top = floor(y1 - vertical_margin)
+    right = ceil(x2 + horizontal_margin)
+    bottom = ceil(y2 + vertical_margin)
+
+    left = min(left, width)
+    top = min(top, height)
+    right = min(right, width)
+    bottom = min(bottom, height)
+    left = max(0, left)
+    top = max(0, top)
+    right = max(0, right)
+    bottom = max(0, bottom)
+
     if right <= left or bottom <= top:
         raise ValueError("Face box does not produce a non-empty crop.")
-    cropped_image = image[top:bottom, left:right].copy()
+    crop = image[top:bottom, left:right]
+    cropped_image = crop.copy()
     return cropped_image, (left, top, right, bottom)
 
 
@@ -69,6 +87,7 @@ def prepare_embedding_face(original_image, landmarks):
         x, y = landmarks[index][:2]
         if not np.isfinite(x) or not np.isfinite(y) or x <= 0 or y <= 0:
             raise ValueError("A facial landmark is missing.")
+
         target_x, target_y = target_points[index]
         equations.append([x, -y, 1, 0])
         equations.append([y, x, 0, 1])
@@ -88,16 +107,13 @@ def prepare_embedding_face(original_image, landmarks):
 
 def load_embedder(model_path):
     # load the recognizer once and reuse its cpu session for each image
-    if not model_path.is_file():
-        raise FileNotFoundError(f"Put Buffalo L's w600k_r50.onnx in {model_path.parent}")
-    session = onnxruntime.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    filename = str(model_path)
+    session = onnxruntime.InferenceSession(filename, providers=["CPUExecutionProvider"])
     return session
 
 
 def create_embedding(aligned_face, session):
     # convert bgr pixels to rgb, normalize them, and put channels before height and width
-    if aligned_face.shape != (112, 112, 3):
-        raise ValueError("Buffalo L expects a 112 by 112 color image.")
     rgb_image = cv2.cvtColor(aligned_face, cv2.COLOR_BGR2RGB)
     float_image = rgb_image.astype(np.float32)
     centered_image = float_image - 127.5
@@ -107,9 +123,12 @@ def create_embedding(aligned_face, session):
     model_input = np.ascontiguousarray(model_input)
 
     # run the network and scale the resulting vector to length one
-    input_name = session.get_inputs()[0].name
-    outputs = session.run(None, {input_name: model_input})
-    vector = outputs[0].reshape(-1)
+    inputs = session.get_inputs()
+    input_name = inputs[0].name
+    input_values = {input_name: model_input}
+    outputs = session.run(None, input_values)
+    model_output = outputs[0]
+    vector = model_output.reshape(-1)
     if vector.size != 512 or not np.isfinite(vector).all():
         raise ValueError("Expected a finite 512-value Buffalo L embedding.")
     length = np.linalg.norm(vector)

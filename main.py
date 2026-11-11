@@ -20,14 +20,14 @@ def eredmeny_print(box, i):
     print(f"  Class ID: {int(class_id)}")
 
 def draw_BB(box, images):
-    #extract BB coordinates
+    #extract bb coordinates
     x1, y1, x2, y2 = box.xyxy[0]
     x1 = int(x1)
     y1 = int(y1)
     x2 = int(x2)
     y2 = int(y2)
     confidence = float(box.conf[0]) #detection confidence stored for display
-    #BB drawing:
+    #bb drawing:
     cv2.rectangle(
         images,
         (x1, y1),
@@ -35,7 +35,8 @@ def draw_BB(box, images):
         (255, 255, 0),
         2
     )
-    label = f"Face {100*confidence:.2f}%"
+    confidence_percent = 100 * confidence
+    label = f"Face {confidence_percent:.2f}%"
     cv2.putText(
         images,
         label,
@@ -47,14 +48,14 @@ def draw_BB(box, images):
     )
 
 def draw_rBB(box, images): #resized bounding boxes
-    #extract BB coordinates
+    #extract bb coordinates
     x1, y1, x2, y2 = box.xyxy[0]
     x1 = int(x1/3)
     y1 = int(y1/3)
     x2 = int(x2/3)
     y2 = int(y2/3)
     confidence = float(box.conf[0]) #detection confidence stored for display
-    #BB drawing:
+    #bb drawing:
     cv2.rectangle(
         images,
         (x1, y1),
@@ -62,7 +63,8 @@ def draw_rBB(box, images): #resized bounding boxes
         (255, 255, 0),
         2
     )
-    label = f"Face {100*confidence:.2f}%"
+    confidence_percent = 100 * confidence
+    label = f"Face {confidence_percent:.2f}%"
     cv2.putText(
         images,
         label,
@@ -73,47 +75,62 @@ def draw_rBB(box, images): #resized bounding boxes
         2
     )
 def draw_landmarks(keypoints, image, scale=1.0, min_confidence=0.5):
-    # Five points per face. Numbering preserves the model's landmark order.
-    # Left/right refer to the picture as viewed, not the person's anatomy.
+    # five points per face. numbering preserves the model's landmark order.
+    # left/right refer to the picture as viewed, not the person's anatomy.
     landmark_names = ("left eye", "right eye", "nose tip",
                       "left mouth corner", "right mouth corner")
-    # Coordinates are in original-image pixels; scale only changes the drawing.
-    for face_i, points in enumerate(keypoints.data.cpu().tolist()):
-        print(f"  Landmarks for face {face_i + 1} (original-image pixels):")
+    # coordinates are in original-image pixels; scale only changes the drawing.
+    cpu_keypoints = keypoints.data.cpu()
+    landmark_groups = cpu_keypoints.tolist()
+    for face_number, points in enumerate(landmark_groups, start=1):
+        print(f"  Landmarks for face {face_number} (original-image pixels):")
         for point_i, point in enumerate(points):
             x, y = point[:2]
-            confidence = point[2] if len(point) == 3 else None
-            valid = (x > 0 and y > 0 and
-                     (confidence is None or confidence >= min_confidence))
-            confidence_text = "n/a" if confidence is None else f"{confidence:.3f}"
+            confidence = None
+            if len(point) == 3:
+                confidence = point[2]
+
+            valid = x > 0 and y > 0
+            confidence_text = "n/a"
+            if confidence is not None:
+                valid = valid and confidence >= min_confidence
+                confidence_text = f"{confidence:.3f}"
             print(f"    {landmark_names[point_i]}: x={x:.2f}, y={y:.2f}, "
                   f"confidence={confidence_text}, drawn={valid}")
+
             if not valid:
                 continue
-            position = (round(x * scale), round(y * scale))
+
+            scaled_x = round(x * scale)
+            scaled_y = round(y * scale)
+            position = (scaled_x, scaled_y)
             cv2.circle(image, position, 3, (0, 0, 255), -1)
             cv2.putText(image, str(point_i),
                         (position[0] + 4, position[1] - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
 
 def process_aligned_faces(result, session, aligned_dir, cropped_dir, show=True, embedding_dir=None):
-    processed_faces = [] # Return images for the GUI as well as saving them.
+    processed_faces = [] # return images for the gui as well as saving them.
     if result.keypoints is None:
         return processed_faces
     source_path = Path(result.path)
-    landmark_groups = result.keypoints.data.cpu().tolist()
-    boxes = result.boxes.xyxy.cpu().tolist()
+    cpu_keypoints = result.keypoints.data.cpu()
+    landmark_groups = cpu_keypoints.tolist()
+    cpu_boxes = result.boxes.xyxy.cpu()
+    boxes = cpu_boxes.tolist()
+
     for face_i, points in enumerate(landmark_groups):
+        face_number = face_i + 1
         left_eye = points[0][:2]
         right_eye = points[1][:2]
         aligned_image, _, rotation_matrix = rotate_face(result.orig_img, left_eye, right_eye)
-        face_stem = f"{source_path.stem}_face_{face_i + 1}"
+        face_stem = f"{source_path.stem}_face_{face_number}"
         aligned_path = aligned_dir / f"{face_stem}_aligned{source_path.suffix}"
-        if not cv2.imwrite(str(aligned_path), aligned_image):
-            raise RuntimeError(f"Could not save aligned image: {aligned_path}")
+        cv2.imwrite(str(aligned_path), aligned_image)
 
         # reuse the original face box instead of detecting the rotated image again
-        rotated_box = transform_face_box(boxes[face_i], rotation_matrix)
+        original_box = boxes[face_i]
+        rotated_box = transform_face_box(original_box, rotation_matrix)
         cropped_image = None
         try:
             cropped_image, _ = crop_face(aligned_image, rotated_box)
@@ -121,8 +138,7 @@ def process_aligned_faces(result, session, aligned_dir, cropped_dir, show=True, 
             print(f"Preview crop unavailable for {face_stem}: {error}")
         if cropped_image is not None:
             cropped_path = cropped_dir / f"{face_stem}_cropped{source_path.suffix}"
-            if not cv2.imwrite(str(cropped_path), cropped_image):
-                raise RuntimeError(f"Could not save cropped image: {cropped_path}")
+            cv2.imwrite(str(cropped_path), cropped_image)
 
         # the recognizer has its own crop; the box crop is for inspection
         embedding = None
@@ -150,14 +166,17 @@ def process_aligned_faces(result, session, aligned_dir, cropped_dir, show=True, 
 
 def main():
     # the batch test reads old captures but only writes to its own folder
-    project_dir = Path(__file__).resolve().parent
+    script_path = Path(__file__).resolve()
+    project_dir = script_path.parent
     input_path = project_dir / "kepek/landmarking test2/nyers"
     output_dir = project_dir / "kepek/embedding test1"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     weights = project_dir / "weights"
-    model = YOLO(str(weights / "yolo11s-pose_widerface.pt"))
-    session = load_embedder(weights / "w600k_r50.onnx")
+    detector_path = weights / "yolo11s-pose_widerface.pt"
+    model = YOLO(str(detector_path))
+    recognizer_path = weights / "w600k_r50.onnx"
+    session = load_embedder(recognizer_path)
     results = model(str(input_path), stream=True, verbose=False)
     report_path = output_dir / "results.csv"
 
@@ -178,11 +197,13 @@ def main():
                 if cropped_image is None:
                     preview_name = ""
                 if embedding is None:
-                    writer.writerow([source_path.name, face_number, "unavailable", preview_name, "", ""])
+                    row = [source_path.name, face_number, "unavailable", preview_name, "", ""]
                 else:
                     model_face_name = f"{face_stem}_input.png"
                     vector_name = f"{face_stem}_embedding.npy"
-                    writer.writerow([source_path.name, face_number, "ok", preview_name, model_face_name, vector_name])
+                    row = [source_path.name, face_number, "ok", preview_name, model_face_name, vector_name]
+
+                writer.writerow(row)
     print(f"Embedding test results: {report_path}")
 
 

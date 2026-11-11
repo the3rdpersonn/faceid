@@ -7,9 +7,11 @@ from threading import Thread
 import cv2
 from cam_input import *
 
-input_dir = Path(__file__).resolve().parent / "kepek/landmarking test2/nyers"
-# Path type object. resolve() ->absolute path - the complete location of the script
-# parent: THE CODE + "kepek/test2/nyers" joins folder with the input folder
+script_path = Path(__file__).resolve()
+project_dir = script_path.parent
+input_dir = project_dir / "kepek/landmarking test2/nyers"
+# path type object. resolve() ->absolute path - the complete location of the script
+# parent: the code + "kepek/test2/nyers" joins folder with the input folder
 # advantage: this stays relative to the scripts location, regardless where i run it from.
 input_dir.mkdir(parents=True, exist_ok=True) #in case thee folder path is incomplete, it creates missing folders
 
@@ -27,31 +29,38 @@ for index in range(2):
 
 
 def show_image(label, image):
-    # Keep the original pixels; resizing here is for display only.
+    # keep the original pixels; resizing here is for display only.
     label.source_image = image
     width = label.winfo_width() - 8
     height = label.winfo_height() - 8
     if width <= 0 or height <= 0:
-        return # The Configure event will draw once the panel has a size.
+        return # the configure event will draw once the panel has a size.
 
     image_height, image_width = image.shape[:2]
-    scale = min(width / image_width, height / image_height)
-    display_size = (max(1, int(image_width * scale)),
-                    max(1, int(image_height * scale)))
-    display_image = cv2.resize(image, display_size, interpolation=(
-        cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR))
-    success, pngData = cv2.imencode(".png", display_image)
-    if not success:
-        raise RuntimeError("Could not prepare the display image.")
-    photo = PhotoImage(data=pngData.tobytes())
+    width_scale = width / image_width
+    height_scale = height / image_height
+    scale = min(width_scale, height_scale)
+    scaled_width = int(image_width * scale)
+    scaled_height = int(image_height * scale)
+    display_width = max(1, scaled_width)
+    display_height = max(1, scaled_height)
+    display_size = (display_width, display_height)
+
+    interpolation = cv2.INTER_LINEAR
+    if scale < 1:
+        interpolation = cv2.INTER_AREA
+    display_image = cv2.resize(image, display_size, interpolation=interpolation)
+    _, png_data = cv2.imencode(".png", display_image)
+    png_bytes = png_data.tobytes()
+    photo = PhotoImage(data=png_bytes)
     label.configure(image=photo, text="")
-    label.image = photo # Tkinter needs a Python reference to keep the image alive.
+    label.image = photo # tkinter needs a python reference to keep the image alive.
 
 
 def create_image_box(parent, title, row, column):
     panel = Frame(parent, bd=1, relief=SOLID)
     panel.grid(row=row, column=column, sticky="nsew", padx=6, pady=6)
-    panel.grid_propagate(False) # Image dimensions must not change the grid sizes.
+    panel.grid_propagate(False) # image dimensions must not change the grid sizes.
     panel.grid_columnconfigure(0, weight=1)
     panel.grid_rowconfigure(1, weight=1)
     Label(panel, text=title).grid(row=0, column=0, sticky="ew", pady=4)
@@ -92,13 +101,13 @@ embedding_session = None
 
 
 def process_capture(image_path):
-    # Only this worker uses the models. All widget updates stay in Tkinter.
+    # only this worker uses the models. all widget updates stay in tkinter.
     global model, embedding_session
     try:
         from main import YOLO, draw_BB, draw_landmarks, eredmeny_print, process_aligned_faces
         from preprocessing import load_embedder
 
-        weights = Path(__file__).resolve().parent / "weights"
+        weights = project_dir / "weights"
         if model is None:
             detector_path = weights / "yolo11s-pose_widerface.pt"
             model = YOLO(str(detector_path))
@@ -109,7 +118,8 @@ def process_capture(image_path):
         for directory in (output_dir, aligned_dir, cropped_dir):
             directory.mkdir(parents=True, exist_ok=True)
 
-        result = model(str(image_path))[0]
+        results = model(str(image_path))
+        result = results[0]
         annotated = result.orig_img.copy()
         for i, box in enumerate(result.boxes):
             eredmeny_print(box, i)
@@ -117,8 +127,7 @@ def process_capture(image_path):
         if result.keypoints is not None:
             draw_landmarks(result.keypoints, annotated)
         annotated_path = output_dir / f"{image_path.stem}_processed{image_path.suffix}"
-        if not cv2.imwrite(str(annotated_path), annotated):
-            raise RuntimeError(f"Could not save annotated image: {annotated_path}")
+        cv2.imwrite(str(annotated_path), annotated)
         processing_results.put(("image", annotation_box, annotated))
 
         face_count = len(result.boxes)
@@ -153,7 +162,7 @@ def process_capture(image_path):
         else:
             processing_results.put(("status", embedding_label, "Embedding unavailable"))
     except Exception as error:
-        # Keep completed panels and report the failed processing step in the terminal.
+        # keep completed panels and report the failed processing step in the terminal.
         print(f"Capture processing failed: {error}")
         processing_results.put(("status", embedding_label, "Embedding unavailable"))
     finally:
@@ -187,7 +196,7 @@ def update_preview():
         current_frame = read_frame(camera) #fnc from cam_input.py
         show_image(preview_box, current_frame)
 
-    # Keep exactly one callback chain, including while the preview is frozen.
+    # keep exactly one callback chain, including while the preview is frozen.
     window.after(30, update_preview) #calls fnc after 30ms
 
 
@@ -198,10 +207,12 @@ def foto():
         return
 
     snapshot = current_frame.copy()
-    fName = dt.now().strftime("capture_%Y%m%d_%H%M%S_%f.jpg") #filename based on time of fotozas
+    capture_time = dt.now()
+    filename = capture_time.strftime("capture_%Y%m%d_%H%M%S_%f.jpg")
+    image_path = input_dir / filename
 
     try:
-        if not cv2.imwrite(str(input_dir / fName), snapshot):
+        if not cv2.imwrite(str(image_path), snapshot):
             print("Could not save the picture.")
             return
     except (cv2.error, OSError) as error:
@@ -216,7 +227,8 @@ def foto():
     retake_button.configure(state=DISABLED)
     processing_active = True
     annotation_box.configure(text="Detecting...")
-    Thread(target=process_capture, args=(input_dir / fName,), daemon=True).start()
+    worker = Thread(target=process_capture, args=(image_path,), daemon=True)
+    worker.start()
 
 
 def retake():
