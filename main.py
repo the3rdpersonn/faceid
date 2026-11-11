@@ -8,7 +8,12 @@ from preprocessing import prepare_embedding_face, rotate_face, transform_face_bo
 
 
 
-#---------fncs-----------------------
+PROJECT_DIR = Path(__file__).resolve().parent
+WEIGHTS_DIR = PROJECT_DIR / "weights"
+DETECTOR_PATH = WEIGHTS_DIR / "yolo11s-pose_widerface.pt"
+RECOGNIZER_PATH = WEIGHTS_DIR / "w600k_r50.onnx"
+
+
 def eredmeny_print(box, i):
     coordinates = box.xyxy[0]
     confidence = box.conf[0]
@@ -47,33 +52,7 @@ def draw_BB(box, images):
         2
     )
 
-def draw_rBB(box, images): #resized bounding boxes
-    #extract bb coordinates
-    x1, y1, x2, y2 = box.xyxy[0]
-    x1 = int(x1/3)
-    y1 = int(y1/3)
-    x2 = int(x2/3)
-    y2 = int(y2/3)
-    confidence = float(box.conf[0]) #detection confidence stored for display
-    #bb drawing:
-    cv2.rectangle(
-        images,
-        (x1, y1),
-        (x2, y2),
-        (255, 255, 0),
-        2
-    )
-    confidence_percent = 100 * confidence
-    label = f"Face {confidence_percent:.2f}%"
-    cv2.putText(
-        images,
-        label,
-        (x1, y1 - 10),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        (255, 255, 0),
-        2
-    )
+
 def draw_landmarks(keypoints, image, scale=1.0, min_confidence=0.5):
     # five points per face. numbering preserves the model's landmark order.
     # left/right refer to the picture as viewed, not the person's anatomy.
@@ -109,7 +88,7 @@ def draw_landmarks(keypoints, image, scale=1.0, min_confidence=0.5):
                         (position[0] + 4, position[1] - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
 
-def process_aligned_faces(result, session, aligned_dir, cropped_dir, show=True, embedding_dir=None):
+def process_aligned_faces(result, session, aligned_dir, cropped_dir, embedding_dir=None):
     processed_faces = [] # return images for the gui as well as saving them.
     if result.keypoints is None:
         return processed_faces
@@ -157,8 +136,6 @@ def process_aligned_faces(result, session, aligned_dir, cropped_dir, show=True, 
             np.save(embedding_path, embedding)
 
         processed_faces.append((aligned_image, cropped_image, embedding))
-        if show and cropped_image is not None:
-            cv2.imshow(f"Cropped face {face_i + 1}", cropped_image)
     return processed_faces
 
 #------------------------------------
@@ -166,17 +143,12 @@ def process_aligned_faces(result, session, aligned_dir, cropped_dir, show=True, 
 
 def main():
     # the batch test reads old captures but only writes to its own folder
-    script_path = Path(__file__).resolve()
-    project_dir = script_path.parent
-    input_path = project_dir / "kepek/landmarking test2/nyers"
-    output_dir = project_dir / "kepek/embedding test1"
+    input_path = PROJECT_DIR / "kepek/landmarking test2/nyers"
+    output_dir = PROJECT_DIR / "kepek/embedding test1"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    weights = project_dir / "weights"
-    detector_path = weights / "yolo11s-pose_widerface.pt"
-    model = YOLO(str(detector_path))
-    recognizer_path = weights / "w600k_r50.onnx"
-    session = load_embedder(recognizer_path)
+    model = YOLO(str(DETECTOR_PATH))
+    session = load_embedder(RECOGNIZER_PATH)
     results = model(str(input_path), stream=True, verbose=False)
     report_path = output_dir / "results.csv"
 
@@ -187,7 +159,7 @@ def main():
         for result in results:
             source_path = Path(result.path)
             faces = process_aligned_faces(result, session, output_dir, output_dir,
-                                          show=False, embedding_dir=output_dir)
+                                          embedding_dir=output_dir)
             if not faces:
                 writer.writerow([source_path.name, "", "unavailable", "", "", ""])
             for face_number, face in enumerate(faces, start=1):

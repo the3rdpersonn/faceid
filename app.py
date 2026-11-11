@@ -100,17 +100,25 @@ model = None
 embedding_session = None
 
 
-def process_capture(image_path):
+def process_capture(image_path, snapshot):
     # only this worker uses the models. all widget updates stay in tkinter.
     global model, embedding_session
     try:
-        from main import YOLO, draw_BB, draw_landmarks, eredmeny_print, process_aligned_faces
+        # keep detection on the saved jpeg, but save it off the ui thread
+        try:
+            saved = cv2.imwrite(str(image_path), snapshot)
+        except (cv2.error, OSError):
+            saved = False
+        if not saved:
+            processing_results.put(("status", embedding_label, "Could not save the picture"))
+            return
+
+        from main import DETECTOR_PATH, RECOGNIZER_PATH, YOLO
+        from main import draw_BB, draw_landmarks, eredmeny_print, process_aligned_faces
         from preprocessing import load_embedder
 
-        weights = project_dir / "weights"
         if model is None:
-            detector_path = weights / "yolo11s-pose_widerface.pt"
-            model = YOLO(str(detector_path))
+            model = YOLO(str(DETECTOR_PATH))
 
         output_dir = input_dir.parent / "feldolgozott"
         aligned_dir = input_dir.parent / "aligned"
@@ -135,16 +143,14 @@ def process_capture(image_path):
             processing_results.put(("status", embedding_label, "Embedding unavailable · capture one face"))
             return
 
-        processing_results.put(("status", alignment_box, "Aligning and cropping..."))
         if embedding_session is None:
-            recognizer_path = weights / "w600k_r50.onnx"
             try:
-                embedding_session = load_embedder(recognizer_path)
+                embedding_session = load_embedder(RECOGNIZER_PATH)
             except Exception as error:
                 # keep the inspection images available if the recognizer cannot load
                 print(f"Embedding unavailable: {error}")
 
-        images = process_aligned_faces(result, embedding_session, aligned_dir, cropped_dir, show=False)
+        images = process_aligned_faces(result, embedding_session, aligned_dir, cropped_dir)
         if images:
             aligned, cropped, embedding = images[0]
             processing_results.put(("image", alignment_box, aligned))
@@ -182,8 +188,6 @@ def poll_processing_results():
             label.configure(text=value)
         elif kind == "done":
             processing_active = False
-            for panel in (annotation_box, alignment_box, crop_box):
-                panel.configure(text="")
             retake_button.configure(state=NORMAL)
     window.after(50, poll_processing_results)
 
@@ -211,23 +215,14 @@ def foto():
     filename = capture_time.strftime("capture_%Y%m%d_%H%M%S_%f.jpg")
     image_path = input_dir / filename
 
-    try:
-        if not cv2.imwrite(str(image_path), snapshot):
-            print("Could not save the picture.")
-            return
-    except (cv2.error, OSError) as error:
-        print(f"Could not save the picture: {error}")
-        return
-
     preview_active = False
     show_image(preview_box, snapshot)
     clear_processing_boxes()
-    embedding_label.configure(text="Creating embedding...")
+    embedding_label.configure(text="Processing capture...")
     button1.configure(state=DISABLED)
     retake_button.configure(state=DISABLED)
     processing_active = True
-    annotation_box.configure(text="Detecting...")
-    worker = Thread(target=process_capture, args=(image_path,), daemon=True)
+    worker = Thread(target=process_capture, args=(image_path, snapshot), daemon=True)
     worker.start()
 
 
