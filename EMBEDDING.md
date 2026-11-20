@@ -8,9 +8,26 @@ Run these commands from `THE CODE` in PowerShell using the existing Python 3.12 
 & '.venv/Scripts/python.exe' main.py
 ```
 
-`app.py` opens the camera. Press **Capture** to see the detection, aligned image,
-face crop and an embedding status with three sample values. Press **Retake** to
-clear the result. The GUI does not save webcam embedding vectors.
+`app.py` opens the camera in **Showcase** mode. Press **Capture** to see the
+detection, aligned image, face crop and an embedding status with three sample
+values. Press **Retake** to clear the result. Showcase displays the webcam
+embedding without saving the vector.
+
+Use **Switch to Scan** to see the live landmark and pose measurements.
+Choose a save folder, then press **Start scan** and follow the prompts. The
+scan uses relative turn scores and collects five views. Each completed scan
+creates a new `scan_<timestamp>` folder in the selected folder with original
+PNGs in `images/`, vectors in `embeddings/`, and a `references.csv` linking
+both to `person_001`. When **Scan complete** appears, you can give that ID an
+optional display name. To name an earlier scan, select its folder and click
+**Name reference scan**.
+
+To test a scan, select its folder and a separate folder of test photos. Leave
+**Score cutoff** blank for a first run to inspect the scores. Enter a cutoff to
+classify each detected face as the enrolled person or `unknown`. Select a
+result row to see the corresponding face box in the photo. Accepted matches
+show the face number and enrollment name above the box. Use **Print results**
+to send the table to the terminal.
 
 `main.py` runs the batch test without opening windows. It reads the existing
 `kepek/landmarking test2/nyers` images and writes a CSV, crops, recognizer inputs
@@ -27,5 +44,4 @@ InsightFace's published weights are for non-commercial research. Do not stage
 weights, personal captures, generated vectors, or the virtual environment.
 
 The tested setup is Python 3.12.10, Ultralytics 8.4.173, PyTorch 2.14.1+cpu,
-OpenCV 5.0.0, NumPy 2.5.2, ONNX Runtime 1.31.1 and Tk 8.6. This milestone
-generates embeddings; it does not enroll or identify people.
+OpenCV 5.0.0, NumPy 2.5.2, ONNX Runtime 1.31.1 and Tk 8.6.

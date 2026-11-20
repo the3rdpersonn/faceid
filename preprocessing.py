@@ -1,10 +1,9 @@
 """Image geometry and buffalo l embedding functions."""
 
-from math import atan2, ceil, degrees, floor
+from math import atan2, ceil, degrees, floor, isfinite
 
 import cv2
 import numpy as np
-import onnxruntime
 
 
 def Get_angle(left_eye, right_eye):
@@ -14,6 +13,25 @@ def Get_angle(left_eye, right_eye):
     angle_in_radians = atan2(dy, dx)
     angle_in_degrees = degrees(angle_in_radians)
     return angle_in_degrees
+
+
+def measure_turn(left_eye, right_eye, nose):
+    # project onto the eye line and divide by eye spacing to get a relative score
+    eye_x = right_eye[0] - left_eye[0]
+    eye_y = right_eye[1] - left_eye[1]
+    spacing_squared = eye_x * eye_x + eye_y * eye_y
+    if not isfinite(spacing_squared) or spacing_squared <= 0:
+        raise ValueError("The eyes do not define an eye line.")
+
+    midpoint_x = (left_eye[0] + right_eye[0]) / 2
+    midpoint_y = (left_eye[1] + right_eye[1]) / 2
+    nose_x = nose[0] - midpoint_x
+    nose_y = nose[1] - midpoint_y
+    projection = nose_x * eye_x + nose_y * eye_y
+    score = projection / spacing_squared
+    if not isfinite(score):
+        raise ValueError("The nose does not define a turn score.")
+    return score
 
 
 def rotate_face(image, left_eye, right_eye):
@@ -107,6 +125,8 @@ def prepare_embedding_face(original_image, landmarks):
 
 def load_embedder(model_path):
     # load the recognizer once and reuse its cpu session for each image
+    import onnxruntime
+
     filename = str(model_path)
     session = onnxruntime.InferenceSession(filename, providers=["CPUExecutionProvider"])
     return session

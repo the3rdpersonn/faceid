@@ -2,10 +2,11 @@ from tkinter import *
 from pathlib import Path
 from datetime import datetime as dt
 from queue import Queue, Empty
-from threading import Thread
+from threading import Lock, Thread
 
 import cv2
 from cam_input import *
+from scan import ScanView
 
 script_path = Path(__file__).resolve()
 project_dir = script_path.parent
@@ -18,8 +19,11 @@ input_dir.mkdir(parents=True, exist_ok=True) #in case thee folder path is incomp
 
 window = Tk() #initiates the window
 window.title("Face processing")
-window.geometry("1000x760")
+window.geometry("1280x800")
 window.minsize(640, 480)
+
+mode_bar = Frame(window)
+mode_bar.pack(fill=X)
 
 befoglalo = Frame(window)
 befoglalo.pack(fill=BOTH, expand = True)
@@ -33,6 +37,10 @@ def show_image(label, image):
     label.source_image = image
     width = label.winfo_width() - 8
     height = label.winfo_height() - 8
+    limit = getattr(label, "display_limit", None)
+    if limit is not None:
+        width = min(width, limit[0])
+        height = min(height, limit[1])
     if width <= 0 or height <= 0:
         return # the configure event will draw once the panel has a size.
 
@@ -98,11 +106,38 @@ processing_active = False
 processing_results = Queue()
 model = None
 embedding_session = None
+detector_lock = Lock()
+scan_mode = False
+
+
+def detect_image(image, quiet=False):
+    # both views reuse one detector without running it from two threads at once
+    global model
+    from main import DETECTOR_PATH, YOLO
+
+    with detector_lock:
+        if model is None:
+            model = YOLO(str(DETECTOR_PATH))
+        if quiet:
+            results = model(image, verbose=False)
+        else:
+            results = model(image)
+        return results[0]
+
+
+def get_embedder():
+    # share the existing lazy-loaded Buffalo L session between both views
+    global embedding_session
+    from main import RECOGNIZER_PATH
+    from preprocessing import load_embedder
+
+    if embedding_session is None:
+        embedding_session = load_embedder(RECOGNIZER_PATH)
+    return embedding_session
 
 
 def process_capture(image_path, snapshot):
     # only this worker uses the models. all widget updates stay in tkinter.
-    global model, embedding_session
     try:
         # keep detection on the saved jpeg, but save it off the ui thread
         try:
@@ -113,12 +148,7 @@ def process_capture(image_path, snapshot):
             processing_results.put(("status", embedding_label, "Could not save the picture"))
             return
 
-        from main import DETECTOR_PATH, RECOGNIZER_PATH, YOLO
         from main import draw_BB, draw_landmarks, eredmeny_print, process_aligned_faces
-        from preprocessing import load_embedder
-
-        if model is None:
-            model = YOLO(str(DETECTOR_PATH))
 
         output_dir = input_dir.parent / "feldolgozott"
         aligned_dir = input_dir.parent / "aligned"
@@ -126,8 +156,7 @@ def process_capture(image_path, snapshot):
         for directory in (output_dir, aligned_dir, cropped_dir):
             directory.mkdir(parents=True, exist_ok=True)
 
-        results = model(str(image_path))
-        result = results[0]
+        result = detect_image(str(image_path))
         annotated = result.orig_img.copy()
         for i, box in enumerate(result.boxes):
             eredmeny_print(box, i)
@@ -143,14 +172,14 @@ def process_capture(image_path, snapshot):
             processing_results.put(("status", embedding_label, "Embedding unavailable · capture one face"))
             return
 
-        if embedding_session is None:
-            try:
-                embedding_session = load_embedder(RECOGNIZER_PATH)
-            except Exception as error:
-                # keep the inspection images available if the recognizer cannot load
-                print(f"Embedding unavailable: {error}")
+        session = None
+        try:
+            session = get_embedder()
+        except Exception as error:
+            # keep the inspection images available if the recognizer cannot load
+            print(f"Embedding unavailable: {error}")
 
-        images = process_aligned_faces(result, embedding_session, aligned_dir, cropped_dir)
+        images = process_aligned_faces(result, session, aligned_dir, cropped_dir)
         if images:
             aligned, cropped, embedding = images[0]
             processing_results.put(("image", alignment_box, aligned))
@@ -189,6 +218,9 @@ def poll_processing_results():
         elif kind == "done":
             processing_active = False
             retake_button.configure(state=NORMAL)
+    scan_view.poll_results()
+    can_switch = not processing_active and not scan_view.busy
+    mode_button.configure(state=NORMAL if can_switch else DISABLED)
     window.after(50, poll_processing_results)
 
 
@@ -196,7 +228,10 @@ def update_preview():
     #keeps the live image updated
     global current_frame #so that the variable is accessible outside of the function
 
-    if preview_active:
+    if scan_mode:
+        current_frame = read_frame(camera)
+        scan_view.show_frame(current_frame)
+    elif preview_active:
         current_frame = read_frame(camera) #fnc from cam_input.py
         show_image(preview_box, current_frame)
 
@@ -237,6 +272,21 @@ def retake():
     retake_button.configure(state=DISABLED)
 
 
+def switch_mode():
+    global scan_mode
+    if processing_active or scan_view.busy:
+        return
+    if scan_mode:
+        scan_view.set_visible(False)
+        befoglalo.pack(fill=BOTH, expand=True)
+        mode_button.configure(text="Switch to Scan")
+    else:
+        befoglalo.pack_forget()
+        scan_view.set_visible(True)
+        mode_button.configure(text="Switch to Showcase")
+    scan_mode = not scan_mode
+
+
 button_row = Frame(befoglalo)
 button_row.grid(row=2, column=0, columnspan=2, pady=(2, 8))
 button1 = Button(button_row, text="Capture", background="purple", fg="white",
@@ -248,6 +298,10 @@ retake_button.pack(side=LEFT, padx=4)
 # keep the embedding status separate from the image panels
 embedding_label = Label(befoglalo, text="No embedding yet")
 embedding_label.grid(row=3, column=0, columnspan=2, pady=(0, 8))
+
+scan_view = ScanView(window, detect_image, get_embedder, show_image)
+mode_button = Button(mode_bar, text="Switch to Scan", command=switch_mode)
+mode_button.pack(side=RIGHT, padx=8, pady=4)
 
 try:
     update_preview()
