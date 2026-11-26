@@ -8,6 +8,7 @@ from preprocessing import prepare_embedding_face, rotate_face, transform_face_bo
 
 
 
+# anchor model and image paths to this script so the launch folder does not matter
 PROJECT_DIR = Path(__file__).resolve().parent
 WEIGHTS_DIR = PROJECT_DIR / "weights"
 DETECTOR_PATH = WEIGHTS_DIR / "yolo11s-pose_widerface.pt"
@@ -15,6 +16,7 @@ RECOGNIZER_PATH = WEIGHTS_DIR / "w600k_r50.onnx"
 
 
 def eredmeny_print(box, i):
+    # xyxy stores the left, top, right, and bottom edges of one detected face
     coordinates = box.xyxy[0]
     confidence = box.conf[0]
     class_id = box.cls[0]
@@ -27,6 +29,7 @@ def eredmeny_print(box, i):
 def draw_BB(box, images):
     #extract bb coordinates
     x1, y1, x2, y2 = box.xyxy[0]
+    # drawing functions use whole pixel positions
     x1 = int(x1)
     y1 = int(y1)
     x2 = int(x2)
@@ -40,6 +43,7 @@ def draw_BB(box, images):
         (255, 255, 0),
         2
     )
+    # multiply a confidence between zero and one by one hundred for the label
     confidence_percent = 100 * confidence
     label = f"Face {confidence_percent:.2f}%"
     cv2.putText(
@@ -59,6 +63,7 @@ def draw_landmarks(keypoints, image, scale=1.0, min_confidence=0.5):
     landmark_names = ("left eye", "right eye", "nose tip",
                       "left mouth corner", "right mouth corner")
     # coordinates are in original-image pixels; scale only changes the drawing.
+    # move the model points to cpu memory before converting them into python lists
     cpu_keypoints = keypoints.data.cpu()
     landmark_groups = cpu_keypoints.tolist()
     for face_number, points in enumerate(landmark_groups, start=1):
@@ -77,6 +82,7 @@ def draw_landmarks(keypoints, image, scale=1.0, min_confidence=0.5):
             print(f"    {landmark_names[point_i]}: x={x:.2f}, y={y:.2f}, "
                   f"confidence={confidence_text}, drawn={valid}")
 
+            # skip this point when its position or confidence is unsuitable for drawing
             if not valid:
                 continue
 
@@ -102,7 +108,9 @@ def process_aligned_faces(result, session, aligned_dir, cropped_dir, embedding_d
         face_number = face_i + 1
         left_eye = points[0][:2]
         right_eye = points[1][:2]
+        # rotate the full image until the line between the eyes is horizontal
         aligned_image, _, rotation_matrix = rotate_face(result.orig_img, left_eye, right_eye)
+        # include the face number so multiple faces from one photo get different filenames
         face_stem = f"{source_path.stem}_face_{face_number}"
         aligned_path = aligned_dir / f"{face_stem}_aligned{source_path.suffix}"
         cv2.imwrite(str(aligned_path), aligned_image)
@@ -149,6 +157,7 @@ def main():
 
     model = YOLO(str(DETECTOR_PATH))
     session = load_embedder(RECOGNIZER_PATH)
+    # streaming returns results one image at a time instead of keeping the whole batch
     results = model(str(input_path), stream=True, verbose=False)
     report_path = output_dir / "results.csv"
 
@@ -175,6 +184,7 @@ def main():
                     vector_name = f"{face_stem}_embedding.npy"
                     row = [source_path.name, face_number, "ok", preview_name, model_face_name, vector_name]
 
+                # write the filenames and outcome for this face into the batch report
                 writer.writerow(row)
     print(f"Embedding test results: {report_path}")
 

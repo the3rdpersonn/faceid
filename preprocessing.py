@@ -10,6 +10,7 @@ def Get_angle(left_eye, right_eye):
     # left and right refer to the picture. image y coordinates increase downwards.
     dx = right_eye[0] - left_eye[0]
     dy = right_eye[1] - left_eye[1]
+    # atan2 calculates the eye line angle using both horizontal and vertical differences
     angle_in_radians = atan2(dy, dx)
     angle_in_degrees = degrees(angle_in_radians)
     return angle_in_degrees
@@ -19,10 +20,12 @@ def measure_turn(left_eye, right_eye, nose):
     # project onto the eye line and divide by eye spacing to get a relative score
     eye_x = right_eye[0] - left_eye[0]
     eye_y = right_eye[1] - left_eye[1]
+    # squared eye spacing lets the turn score stay relative to face size
     spacing_squared = eye_x * eye_x + eye_y * eye_y
     if not isfinite(spacing_squared) or spacing_squared <= 0:
         raise ValueError("The eyes do not define an eye line.")
 
+    # the average eye position gives the center used by this calculation
     midpoint_x = (left_eye[0] + right_eye[0]) / 2
     midpoint_y = (left_eye[1] + right_eye[1]) / 2
     nose_x = nose[0] - midpoint_x
@@ -40,8 +43,10 @@ def rotate_face(image, left_eye, right_eye):
     midpoint_y = (left_eye[1] + right_eye[1]) / 2
     eye_midpoint = (midpoint_x, midpoint_y)
 
+    # this matrix describes rotation around the midpoint between the eyes
     rotation = cv2.getRotationMatrix2D(eye_midpoint, angle, 1.0)
     height, width = image.shape[:2]
+    # warpaffine uses the matrix to place the original pixels into a rotated image
     rotated_image = cv2.warpAffine(image, rotation, (width, height))
     return rotated_image, angle, rotation
 
@@ -55,6 +60,7 @@ def transform_face_box(box, rotation_matrix):
 
     x_coordinates = rotated_corners[:, 0]
     y_coordinates = rotated_corners[:, 1]
+    # the smallest and largest coordinates form a box around all rotated corners
     left = float(x_coordinates.min())
     top = float(y_coordinates.min())
     right = float(x_coordinates.max())
@@ -70,6 +76,7 @@ def crop_face(image, box_coordinates, margin=0.002):
     height, width = image.shape[:2]
     horizontal_margin = box_width * margin
     vertical_margin = box_height * margin
+    # round the starting edges down and the ending edges up to include boundary pixels
     left = floor(x1 - horizontal_margin)
     top = floor(y1 - vertical_margin)
     right = ceil(x2 + horizontal_margin)
@@ -107,6 +114,7 @@ def prepare_embedding_face(original_image, landmarks):
             raise ValueError("A facial landmark is missing.")
 
         target_x, target_y = target_points[index]
+        # each point adds two equations, one for its horizontal and one for its vertical target
         equations.append([x, -y, 1, 0])
         equations.append([y, x, 0, 1])
         targets.append(target_x)
@@ -138,6 +146,7 @@ def create_embedding(aligned_face, session):
     float_image = rgb_image.astype(np.float32)
     centered_image = float_image - 127.5
     scaled_image = centered_image / 127.5
+    # change height, width, channels into channels, height, width for the network
     channels_first = np.transpose(scaled_image, (2, 0, 1))
     model_input = np.expand_dims(channels_first, axis=0)
     model_input = np.ascontiguousarray(model_input)
@@ -154,5 +163,6 @@ def create_embedding(aligned_face, session):
     length = np.linalg.norm(vector)
     if not np.isfinite(length) or length == 0:
         raise ValueError("Cannot normalize the Buffalo L embedding.")
+    # dividing by the vector length allows later dot products to measure cosine similarity
     embedding = vector / length
     return embedding

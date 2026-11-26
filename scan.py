@@ -11,8 +11,8 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from identification import IMAGE_SUFFIXES, PERSON_ID, load_reference_scan, read_photo
-from identification import read_scan_name, save_scan, score_photo, set_scan_name
+from identification import IMAGE_SUFFIXES, load_reference_gallery, load_reference_scan
+from identification import read_photo, read_scan_identity, save_scan, score_photo, set_scan_name
 from preprocessing import measure_turn
 
 
@@ -35,10 +35,12 @@ def read_pose(result, frame):
     # accept one face with five usable points in the original frame
     if result.boxes is None or len(result.boxes) != 1 or result.keypoints is None:
         return None
-    groups = result.keypoints.data.cpu().tolist()
+    cpu_keypoints = result.keypoints.data.cpu()
+    groups = cpu_keypoints.tolist()
     if len(groups) != 1 or len(groups[0]) != 5:
         return None
 
+    # use the five points from the only face accepted for this camera frame
     landmarks = groups[0]
     height, width = frame.shape[:2]
     for point in landmarks:
@@ -53,7 +55,9 @@ def read_pose(result, frame):
     except ValueError:
         return None
 
-    left, top, right, bottom = result.boxes.xyxy.cpu().tolist()[0]
+    cpu_boxes = result.boxes.xyxy.cpu()
+    boxes = cpu_boxes.tolist()
+    left, top, right, bottom = boxes[0]
     box_width = right - left
     box_height = bottom - top
     return score, landmarks, box_width, box_height
@@ -67,8 +71,12 @@ def draw_test_box(image, box, caption):
 
     # pillow keeps accented names readable when drawing them onto a photo
     height, width = image.shape[:2]
-    preview_ratio = max(width / 960, height / 540)
-    font_size = max(20, round(18 * preview_ratio))
+    # scale the caption font relative to the image dimensions
+    width_ratio = width / 960
+    height_ratio = height / 540
+    preview_ratio = max(width_ratio, height_ratio)
+    scaled_font_size = round(18 * preview_ratio)
+    font_size = max(20, scaled_font_size)
     try:
         font = ImageFont.truetype("segoeui.ttf", font_size)
     except OSError:
@@ -77,19 +85,23 @@ def draw_test_box(image, box, caption):
     rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     photo = Image.fromarray(rgb_image)
     drawing = ImageDraw.Draw(photo)
-    caption = " ".join(caption.split())
+    caption_words = caption.split()
+    caption = " ".join(caption_words)
     left, top, right, bottom = drawing.textbbox((0, 0), caption, font=font)
     padding = 4
     label_width = right - left + 2 * padding
     label_height = bottom - top + 2 * padding
 
-    label_x = max(0, min(start[0], width - label_width))
+    maximum_label_x = width - label_width
+    label_x = min(start[0], maximum_label_x)
+    label_x = max(0, label_x)
     label_y = max(0, start[1] - label_height - 3)
     drawing.rectangle((label_x, label_y, label_x + label_width, label_y + label_height),
                       fill="black")
     text_origin = (label_x + padding - left, label_y + padding - top)
     drawing.text(text_origin, caption, font=font, fill=(0, 255, 255))
-    return cv2.cvtColor(np.asarray(photo), cv2.COLOR_RGB2BGR)
+    photo_pixels = np.asarray(photo)
+    return cv2.cvtColor(photo_pixels, cv2.COLOR_RGB2BGR)
 
 
 def accepted_turn(pose, score_from_front):
@@ -102,6 +114,7 @@ def accepted_turn(pose, score_from_front):
     elif score_from_front <= 0:
         return False
 
+    # after checking direction, use the size of the turn to choose the pose range
     turn = abs(score_from_front)
     if pose.startswith("slight"):
         return 0.08 <= turn < 0.16
@@ -109,7 +122,10 @@ def accepted_turn(pose, score_from_front):
 
 
 class CaptureSequence:
-    def __init__(self):
+    def __init__(self, save_parent, person_id=None, display_name=""):
+        self.save_parent = save_parent
+        self.person_id = person_id
+        self.display_name = display_name
         self.index = 0
         self.baseline = None
         self.recent_scores = []
@@ -123,7 +139,9 @@ class CaptureSequence:
             self.valid_count = 0
             return False
         score, landmarks, width, height = measurement
-        if width < frame.shape[1] * 0.15 or height < frame.shape[0] * 0.15:
+        minimum_width = frame.shape[1] * 0.15
+        minimum_height = frame.shape[0] * 0.15
+        if width < minimum_width or height < minimum_height:
             self.recent_scores.clear()
             self.valid_count = 0
             return False
@@ -131,10 +149,14 @@ class CaptureSequence:
         pose, _ = CAPTURE_STEPS[self.index]
         if pose == "front":
             self.recent_scores.append(score)
-            if max(self.recent_scores) - min(self.recent_scores) > 0.02:
+            highest_score = max(self.recent_scores)
+            lowest_score = min(self.recent_scores)
+            score_range = highest_score - lowest_score
+            if score_range > 0.02:
                 self.recent_scores = [score]
             if len(self.recent_scores) < OBSERVATIONS_NEEDED:
                 return False
+            # the middle of several stable readings becomes the straight ahead reference
             self.baseline = median(self.recent_scores)
         else:
             if not accepted_turn(pose, score - self.baseline):
@@ -147,6 +169,8 @@ class CaptureSequence:
         if pose != "center":
             # keep the source frame paired with the points detected on it
             self.captures.append((pose, score - self.baseline, frame, landmarks))
+
+        # advance to the next prompt only after enough suitable observations
         self.index += 1
         self.valid_count = 0
         return True
@@ -164,12 +188,13 @@ class ScanView(Frame):
         self.sequence = None
         self.save_parent = None
         self.reference_folder = None
+        self.gallery_folder = None
         self.test_folder = None
         self.prompt_time = 0
         self.photo_results = []
-        self.test_display_name = ""
         self.review_image = None
         self.detection_pending = False
+        # tag background results so updates from an older task can be ignored
         self.generation = 0
         self.last_detection = 0
         self.has_readout_frame = False
@@ -198,13 +223,21 @@ class ScanView(Frame):
 
         self.choose_save_button = self.sidebar_button("Choose save folder", self.choose_save_folder)
         self.save_location = self.sidebar_label("No save folder selected")
-        self.start_button = self.sidebar_button("Start scan", self.start_scan)
+        self.start_button = self.sidebar_button("Enroll new person", self.start_scan)
         self.cancel_button = self.sidebar_button("Cancel", self.cancel_scan)
         self.status = self.sidebar_label("")
 
-        self.choose_reference_button = self.sidebar_button("Select reference scan", self.choose_reference_scan)
+        reference_controls = Frame(self.sidebar, bg=BACKGROUND)
+        reference_controls.pack(fill="x", pady=2)
+        self.choose_reference_button = Button(reference_controls, text="Select scan",
+                                              command=self.choose_reference_scan)
+        self.choose_reference_button.pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self.choose_gallery_button = Button(reference_controls, text="Select gallery",
+                                            command=self.choose_reference_gallery)
+        self.choose_gallery_button.pack(side="left", fill="x", expand=True, padx=(2, 0))
         self.reference_location = self.sidebar_label("No reference scan selected")
         self.name_button = self.sidebar_button("Name reference scan", self.name_reference_scan)
+        self.rescan_button = self.sidebar_button("Rescan selected person", self.rescan_person)
         self.choose_test_button = self.sidebar_button("Select test image folder", self.choose_test_folder)
         self.test_location = self.sidebar_label("No test image folder selected")
         self.sidebar_label("Score cutoff (optional)")
@@ -250,20 +283,38 @@ class ScanView(Frame):
 
     def refresh_controls(self):
         # the same camera and models are shared, so a scan and a test take turns
-        selection_state = "disabled" if self.busy else "normal"
+        if self.busy:
+            selection_state = 'disabled'
+        else:
+            selection_state = 'normal'
         self.choose_save_button.configure(state=selection_state)
         self.choose_reference_button.configure(state=selection_state)
+        self.choose_gallery_button.configure(state=selection_state)
         self.choose_test_button.configure(state=selection_state)
         self.cutoff.configure(state=selection_state)
+
         can_name = not self.busy and self.reference_folder is not None
-        self.name_button.configure(state="normal" if can_name else "disabled")
         can_start = not self.busy and self.save_parent is not None
-        self.start_button.configure(state="normal" if can_start else "disabled")
-        self.cancel_button.configure(state="normal" if self.sequence is not None else "disabled")
-        can_test = not self.busy and self.reference_folder is not None and self.test_folder is not None
-        self.test_button.configure(state="normal" if can_test else "disabled")
+        can_cancel = self.sequence is not None
+        has_references = self.reference_folder is not None or self.gallery_folder is not None
+        can_test = not self.busy and has_references and self.test_folder is not None
         can_print = not self.busy and bool(self.photo_results)
-        self.print_button.configure(state="normal" if can_print else "disabled")
+
+        # each button is paired with the condition that enables it
+        button_conditions = [
+            (self.name_button, can_name),
+            (self.rescan_button, can_name),
+            (self.start_button, can_start),
+            (self.cancel_button, can_cancel),
+            (self.test_button, can_test),
+            (self.print_button, can_print),
+        ]
+        for button, enabled in button_conditions:
+            state = "disabled"
+            if enabled:
+                state = "normal"
+            button.configure(state=state)
+
 
     def redraw_preview(self, _event):
         if self.visible and self.preview.source_image is not None:
@@ -293,6 +344,7 @@ class ScanView(Frame):
             return
         self.last_detection = now
         self.detection_pending = True
+        # give the detection worker its own copy of the camera frame
         snapshot = frame.copy()
         worker = Thread(target=self.detect_pose, args=(snapshot, self.generation), daemon=True)
         worker.start()
@@ -311,6 +363,7 @@ class ScanView(Frame):
                 kind, generation, value = self.messages.get_nowait()
             except Empty:
                 break
+            # pose updates refresh the live view while other messages report longer jobs
             if kind == "pose":
                 self.detection_pending = False
                 if self.visible and generation == self.generation:
@@ -360,18 +413,28 @@ class ScanView(Frame):
         if folder:
             scan_path = Path(folder)
             try:
-                display_name = read_scan_name(scan_path)
+                person_id, display_name = read_scan_identity(scan_path)
             except (OSError, ValueError) as error:
                 self.status.configure(text=f"Could not select scan: {error}")
                 return
             self.reference_folder = scan_path
-            self.show_reference_location(display_name)
+            self.gallery_folder = None
+            self.show_reference_location(person_id, display_name)
             self.refresh_controls()
 
-    def show_reference_location(self, display_name):
-        label = PERSON_ID
+    def choose_reference_gallery(self):
+        folder = filedialog.askdirectory(parent=self, title="Select the parent folder of your scans",
+                                         mustexist=True)
+        if folder:
+            self.gallery_folder = Path(folder)
+            self.reference_folder = None
+            self.reference_location.configure(text=f"Gallery folder:\n{self.gallery_folder}")
+            self.refresh_controls()
+
+    def show_reference_location(self, person_id, display_name):
+        label = person_id
         if display_name:
-            label = f"{display_name} ({PERSON_ID})"
+            label = f"{display_name} ({person_id})"
         self.reference_location.configure(text=f"{label}\n{self.reference_folder}")
 
     def name_reference_scan(self):
@@ -379,11 +442,11 @@ class ScanView(Frame):
             return
 
         try:
-            current_name = read_scan_name(self.reference_folder)
+            person_id, current_name = read_scan_identity(self.reference_folder)
             # the optional display name stays separate from the stable person id
             name = simpledialog.askstring(
                 "Name reference scan",
-                f"Optional display name for {PERSON_ID}:",
+                f"Optional display name for {person_id}:",
                 initialvalue=current_name,
                 parent=self.winfo_toplevel(),
             )
@@ -392,7 +455,7 @@ class ScanView(Frame):
             display_name = name.strip()
             if display_name != current_name:
                 set_scan_name(self.reference_folder, display_name)
-            self.show_reference_location(display_name)
+            self.show_reference_location(person_id, display_name)
             self.status.configure(text=f"Reference saved:\n{self.reference_folder}")
         except (OSError, ValueError) as error:
             self.status.configure(text=f"Could not update the display name: {error}")
@@ -415,11 +478,31 @@ class ScanView(Frame):
     def start_scan(self):
         if self.busy or self.save_parent is None:
             return
+        self.start_capture(self.save_parent)
+
+    def rescan_person(self):
+        if self.busy or self.reference_folder is None:
+            return
+        try:
+            person_id, display_name = read_scan_identity(self.reference_folder)
+        except (OSError, ValueError) as error:
+            self.status.configure(text=f"Could not rescan this person: {error}")
+            return
+        # keep the newer scan beside the existing one so the gallery can find both
+        self.start_capture(self.reference_folder.parent, person_id, display_name)
+
+    def start_capture(self, folder, person_id=None, display_name=""):
         self.return_to_live()
         self.generation += 1
-        self.sequence = CaptureSequence()
+        self.sequence = CaptureSequence(folder, person_id, display_name)
         self.set_prompt()
-        self.status.configure(text="Capturing reference poses")
+        if person_id is None:
+            self.status.configure(text="Enrolling a new person")
+        else:
+            person_label = person_id
+            if display_name:
+                person_label = display_name
+            self.status.configure(text=f"Rescanning {person_label}")
         self.refresh_controls()
 
     def set_prompt(self):
@@ -431,6 +514,7 @@ class ScanView(Frame):
         self.set_prompt()
         self.status.configure(text="Still waiting for this pose. Hold it steady to capture.")
 
+    # canceling discards the current sequence before any completed scan is saved
     def cancel_scan(self):
         if self.sequence is None:
             return
@@ -449,7 +533,7 @@ class ScanView(Frame):
             self.status.configure(text=f"{count} of 5 reference views captured")
             return
 
-        captures = self.sequence.captures
+        completed_scan = self.sequence
         self.sequence = None
         self.job = "saving"
         self.generation += 1
@@ -457,23 +541,29 @@ class ScanView(Frame):
         self.status.configure(text="Creating and saving embeddings…")
         self.refresh_controls()
         worker = Thread(target=self.save_references,
-                        args=(self.save_parent, captures, self.generation), daemon=True)
+                        args=(completed_scan, self.generation), daemon=True)
         worker.start()
 
-    def save_references(self, folder, captures, generation):
+    def save_references(self, completed_scan, generation):
         try:
             session = self.get_embedder()
 
             def progress(message):
                 self.messages.put(("progress", generation, message))
 
-            saved_path = save_scan(folder, captures, session, progress)
-            self.messages.put(("saved", generation, saved_path))
+            saved_path = save_scan(completed_scan.save_parent, completed_scan.captures,
+                                   session, progress, completed_scan.person_id,
+                                   completed_scan.display_name)
+            person_id, display_name = read_scan_identity(saved_path)
+            is_new_person = completed_scan.person_id is None
+            self.messages.put(("saved", generation, (saved_path, person_id, display_name, is_new_person)))
         except Exception as error:
             self.messages.put(("error", generation, f"Could not save scan: {error}"))
 
     def run_test(self):
-        if self.busy or self.reference_folder is None or self.test_folder is None:
+        if self.busy or self.test_folder is None:
+            return
+        if self.reference_folder is None and self.gallery_folder is None:
             return
 
         cutoff_text = self.cutoff.get().strip()
@@ -491,18 +581,25 @@ class ScanView(Frame):
         self.job = "testing"
         self.generation += 1
         self.prompt.configure(text="Testing photos")
-        self.status.configure(text="Loading reference scan…")
+        self.status.configure(text="Loading enrolled references…")
         self.refresh_controls()
         worker = Thread(target=self.test_photos,
-                        args=(self.reference_folder, self.test_folder, cutoff, self.generation), daemon=True)
+                        args=(self.reference_folder, self.gallery_folder, self.test_folder,
+                              cutoff, self.generation), daemon=True)
         worker.start()
 
-    def test_photos(self, reference_folder, test_folder, cutoff, generation):
+    def test_photos(self, reference_folder, gallery_folder, test_folder, cutoff, generation):
         try:
-            references, display_name = load_reference_scan(reference_folder)
+            if gallery_folder is None:
+                profiles = [load_reference_scan(reference_folder)]
+            else:
+                profiles = load_reference_gallery(gallery_folder)
             paths = []
-            for path in sorted(test_folder.iterdir()):
-                if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
+            folder_contents = test_folder.iterdir()
+            sorted_paths = sorted(folder_contents)
+            for path in sorted_paths:
+                suffix = path.suffix.lower()
+                if path.is_file() and suffix in IMAGE_SUFFIXES:
                     paths.append(path)
             if not paths:
                 raise ValueError("The test folder contains no supported image files.")
@@ -512,9 +609,9 @@ class ScanView(Frame):
             for number, path in enumerate(paths, start=1):
                 message = f"Testing photo {number} of {len(paths)}"
                 self.messages.put(("progress", generation, message))
-                rows = score_photo(path, self.detect, session, references, cutoff)
+                rows = score_photo(path, self.detect, session, profiles, cutoff)
                 results.extend(rows)
-            self.messages.put(("tested", generation, (results, display_name)))
+            self.messages.put(("tested", generation, (results, len(profiles))))
         except Exception as error:
             self.messages.put(("error", generation, f"Could not run test: {error}"))
 
@@ -527,16 +624,20 @@ class ScanView(Frame):
         self.job = None
         self.return_to_live()
         if kind == "saved":
-            self.reference_folder = value
-            self.show_reference_location("")
+            saved_path, person_id, display_name, is_new_person = value
+            self.reference_folder = saved_path
+            self.gallery_folder = None
+            self.show_reference_location(person_id, display_name)
             self.prompt.configure(text="Scan complete")
-            self.status.configure(text=f"Saved scan:\n{value}")
-            self.name_reference_scan()
+            self.status.configure(text=f"Saved scan:\n{saved_path}")
+            if is_new_person:
+                self.name_reference_scan()
         elif kind == "tested":
-            results, display_name = value
-            self.show_test_results(results, display_name)
+            results, profile_count = value
+            self.show_test_results(results)
             self.prompt.configure(text="Test complete")
-            self.status.configure(text="Test complete. Select a row to locate its face.")
+            self.status.configure(text=f"Enrolled profiles compared: {profile_count}. "
+                                       "Select a row to locate its face.")
         elif kind == "error":
             if finished_job == "saving":
                 self.prompt.configure(text="Scan could not be saved")
@@ -545,17 +646,24 @@ class ScanView(Frame):
             self.status.configure(text=value)
         self.refresh_controls()
 
-    def show_test_results(self, results, display_name=""):
+    def show_test_results(self, results):
         self.photo_results = results
-        self.test_display_name = display_name
         for item in self.table.get_children():
             self.table.delete(item)
         for index, result in enumerate(results):
-            face = "" if result.face_number is None else result.face_number
-            score = "" if result.score is None else f"{result.score:.4f}"
+            if result.face_number is None:
+                face = ''
+            else:
+                face = result.face_number
+            if result.score is None:
+                score = ''
+            else:
+                score = f'{result.score:.4f}'
             outcome = result.result
-            if outcome == PERSON_ID and display_name:
-                outcome = f"{display_name} ({PERSON_ID})"
+            if result.person_id is not None:
+                outcome = result.person_id
+                if result.display_name:
+                    outcome = f"{result.display_name} ({result.person_id})"
             self.table.insert("", "end", iid=str(index),
                               values=(result.path.name, face, score, outcome))
         self.table.grid(row=2, column=0, sticky="ew", padx=(12, 28), pady=(0, 12))
@@ -569,16 +677,25 @@ class ScanView(Frame):
         print("Image | Face | Score | Result")
         for item in self.table.get_children():
             image, face, score, outcome = self.table.item(item, "values")
-            face_text = "-" if face == "" else face
-            score_text = "-" if score == "" else score
+            if face == '':
+                face_text = '-'
+            else:
+                face_text = face
+            if score == '':
+                score_text = '-'
+            else:
+                score_text = score
             print(f"{image} | {face_text} | {score_text} | {outcome}")
         self.status.configure(text="Results printed to the terminal.")
 
+    # selecting a table row opens its source photo and marks the corresponding face
     def review_result(self, _event):
         selection = self.table.selection()
         if self.busy or not selection:
             return
-        result = self.photo_results[int(selection[0])]
+        selected_row = selection[0]
+        result_index = int(selected_row)
+        result = self.photo_results[result_index]
         try:
             image = read_photo(result.path)
         except (OSError, cv2.error):
@@ -588,8 +705,10 @@ class ScanView(Frame):
             return
         if result.box is not None:
             caption = f"Face {result.face_number}"
-            if result.result == PERSON_ID:
-                name = self.test_display_name or PERSON_ID
+            if result.person_id is not None:
+                name = result.person_id
+                if result.display_name:
+                    name = result.display_name
                 caption = f"{caption}: {name}"
             image = draw_test_box(image, result.box, caption)
         self.generation += 1

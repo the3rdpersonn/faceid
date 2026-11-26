@@ -14,20 +14,25 @@ values. Press **Retake** to clear the result. Showcase displays the webcam
 embedding without saving the vector.
 
 Use **Switch to Scan** to see the live landmark and pose measurements.
-Choose a save folder, then press **Start scan** and follow the prompts. The
-scan uses relative turn scores and collects five views. Each completed scan
-creates a new `scan_<timestamp>` folder in the selected folder with original
-PNGs in `images/`, vectors in `embeddings/`, and a `references.csv` linking
-both to `person_001`. When **Scan complete** appears, you can give that ID an
-optional display name. To name an earlier scan, select its folder and click
-**Name reference scan**.
+Choose a save folder, then press **Enroll new person** and follow the prompts.
+Each new person gets a unique ID. The scan saves five reference views in a new
+`scan_<timestamp>` folder, with original PNGs in `images/`, vectors in
+`embeddings/`, and a `references.csv` linking them to the person's ID. When
+**Scan complete** appears, you can give the person a display name.
 
-To test a scan, select its folder and a separate folder of test photos. Leave
-**Score cutoff** blank for a first run to inspect the scores. Enter a cutoff to
-classify each detected face as the enrolled person or `unknown`. Select a
-result row to see the corresponding face box in the photo. Accepted matches
-show the face number and enrollment name above the box. Use **Print results**
-to send the table to the terminal.
+Use **Select scan** to choose a completed scan. **Name reference scan** edits
+its display name. **Rescan selected person** keeps that person's ID and name
+and writes a new scan beside the old one. Existing scans with `person_001`
+are still compatible.
+
+Use **Select gallery** to test against the people whose scan folders share a
+parent directory. The gallery uses the newest completed scan for each ID.
+**Select scan** tests against just that scan. Select a separate test photo
+folder and leave **Score cutoff** blank to inspect the scores on a first run.
+With a cutoff, each face is assigned to the person with the best accepted
+score, or marked `unknown`. A tie between people also returns `unknown`.
+Select a result row to see the face box and its name in the photo. Use
+**Print results** to send the table to the terminal.
 
 `main.py` runs the batch test without opening windows. It reads the existing
 `kepek/landmarking test2/nyers` images and writes a CSV, crops, recognizer inputs

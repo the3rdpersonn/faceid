@@ -45,6 +45,7 @@ def show_image(label, image):
         return # the configure event will draw once the panel has a size.
 
     image_height, image_width = image.shape[:2]
+    # use the smaller scale so the complete image fits inside the panel
     width_scale = width / image_width
     height_scale = height / image_height
     scale = min(width_scale, height_scale)
@@ -58,6 +59,7 @@ def show_image(label, image):
     if scale < 1:
         interpolation = cv2.INTER_AREA
     display_image = cv2.resize(image, display_size, interpolation=interpolation)
+    # encode the display pixels as png bytes that tkinter can read
     _, png_data = cv2.imencode(".png", display_image)
     png_bytes = png_data.tobytes()
     photo = PhotoImage(data=png_bytes)
@@ -82,6 +84,7 @@ def create_image_box(parent, title, row, column):
         if label.source_image is not None:
             show_image(label, label.source_image)
 
+    # redraw the stored image whenever this panel changes size
     label.bind("<Configure>", redraw)
     return label
 
@@ -106,6 +109,7 @@ processing_active = False
 processing_results = Queue()
 model = None
 embedding_session = None
+# the lock lets one worker at a time use the shared detector
 detector_lock = Lock()
 scan_mode = False
 
@@ -116,6 +120,7 @@ def detect_image(image, quiet=False):
     from main import DETECTOR_PATH, YOLO
 
     with detector_lock:
+        # load the detector on its first use and keep it for later captures
         if model is None:
             model = YOLO(str(DETECTOR_PATH))
         if quiet:
@@ -126,11 +131,12 @@ def detect_image(image, quiet=False):
 
 
 def get_embedder():
-    # share the existing lazy-loaded Buffalo L session between both views
+    # share the existing lazy-loaded buffalo l session between both views
     global embedding_session
     from main import RECOGNIZER_PATH
     from preprocessing import load_embedder
 
+    # reuse the recognizer session instead of loading its weights for every face
     if embedding_session is None:
         embedding_session = load_embedder(RECOGNIZER_PATH)
     return embedding_session
@@ -201,6 +207,7 @@ def process_capture(image_path, snapshot):
         print(f"Capture processing failed: {error}")
         processing_results.put(("status", embedding_label, "Embedding unavailable"))
     finally:
+        # always signal completion so the retake button can become available
         processing_results.put(("done", None, None))
 
 
@@ -208,6 +215,7 @@ def poll_processing_results():
     global processing_active
     while True:
         try:
+            # take the next worker update without making the window wait for a message
             kind, label, value = processing_results.get_nowait()
         except Empty:
             break
@@ -220,7 +228,11 @@ def poll_processing_results():
             retake_button.configure(state=NORMAL)
     scan_view.poll_results()
     can_switch = not processing_active and not scan_view.busy
-    mode_button.configure(state=NORMAL if can_switch else DISABLED)
+    if can_switch:
+        state_value = NORMAL
+    else:
+        state_value = DISABLED
+    mode_button.configure(state=state_value)
     window.after(50, poll_processing_results)
 
 
@@ -245,6 +257,7 @@ def foto():
     if current_frame is None or not preview_active or processing_active:
         return
 
+    # copy the current frame so later camera reads cannot change this capture
     snapshot = current_frame.copy()
     capture_time = dt.now()
     filename = capture_time.strftime("capture_%Y%m%d_%H%M%S_%f.jpg")
@@ -284,6 +297,7 @@ def switch_mode():
         befoglalo.pack_forget()
         scan_view.set_visible(True)
         mode_button.configure(text="Switch to Showcase")
+    # remember which view should receive the next camera frame
     scan_mode = not scan_mode
 
 
